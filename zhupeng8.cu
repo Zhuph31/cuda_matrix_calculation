@@ -44,55 +44,33 @@ void cpu_calculate(float **x, float **y, int rows, int cols, float **z) {
   }
 }
 
-void cuda_malloc_matrix(float **m, int rows, int cols) {
-  cudaMalloc((void ***)&m, rows * sizeof(float *));
-  for (int i = 0; i < rows; ++i) {
-    cudaMalloc((void **)&(m[i]), cols * sizeof(float));
-  }
-}
-
-void cuda_free_matrix(float **m, int rows) {
-  for (int i = 0; i < rows; ++i) {
-    cudaFree(m[i]);
-  }
-  cudaFree(m);
-}
-
-void cuda_h_to_d_memcpy(float **d_m, float **h_m, int rows, int cols) {
-  for (int i = 0; i < rows; ++i) {
-    cudaMemcpy(d_m, h_m, cols * sizeof(float), cudaMemcpyHostToDevice);
-  }
-}
-
-void cuda_d_to_h_memcpy(float **h_m, float **d_m, int rows, int cols) {
-  for (int i = 0; i < rows; ++i) {
-    cudaMemcpy(h_m, d_m, cols * sizeof(float), cudaMemcpyDeviceToHost);
-  }
-}
-
 void cpy_and_calculate(float **x, float **y, int rows, int cols) {
   printf("start cpu calculation\n");
-
   // CPU calculation
   float **cpu_z;
   cpu_malloc(&cpu_z, rows, cols);
   cpu_calculate(x, y, rows, cols, cpu_z);
+  printf("debug cpu result\n");
   print_matrix(cpu_z, rows, cols);
   cpu_free(cpu_z, rows);
 
+  printf("start gpu calculation\n");
   // GPU calculation
-  float **d_x, **d_y, **d_z;
-  cuda_malloc_matrix(d_x, rows, cols);
-  cuda_malloc_matrix(d_y, rows, cols);
-  cuda_malloc_matrix(d_z, rows, cols);
+  float *d_x, *d_y, *d_z;
+  printf("cpy\n");
 
-  cuda_h_to_d_memcpy(d_x, x, rows, cols);
-  cuda_h_to_d_memcpy(d_y, y, rows, cols);
+  int elements = rows * cols;
+  cudaMalloc((void **)&d_x, elements * sizeof(float));
+  cudaMalloc((void **)&d_y, elements * sizeof(float));
+  cudaMalloc((void **)&d_z, elements * sizeof(float));
+
+  cudaMemcpy(d_x, x, elements * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_y, y, elements * sizeof(float), cudaMemcpyHostToDevice);
 
   float **test;
   cpu_malloc(&test, rows, cols);
+  cudaMemcpy(test, d_x, elements * sizeof(float), cudaMemcpyDeviceToHost);
 
-  cuda_d_to_h_memcpy(test, d_x, rows, cols);
   printf("print test\n");
   print_matrix(test, rows, cols);
 
