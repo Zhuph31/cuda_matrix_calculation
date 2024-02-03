@@ -22,25 +22,6 @@ void gen_matrix(int rows, int cols, float *x, float *y) {
   }
 }
 
-void cuda_malloc_matrix(float **m, int rows, int cols) {
-  cudaMalloc((void ***)&m, rows * sizeof(float *));
-  for (int i = 0; i < rows; ++i) {
-    cudaMalloc((void **)&(m[i]), cols * sizeof(float));
-  }
-}
-
-void cuda_h_to_d_memcpy(float **h_m, float **d_m, int rows, int cols) {
-  for (int i = 0; i < rows; ++i) {
-    cudaMemcpy(d_m, h_m, cols * sizeof(float), cudaMemcpyHostToDevice);
-  }
-}
-
-void cuda_d_to_h_memcpy(float **d_m, float **h_m, int rows, int cols) {
-  for (int i = 0; i < rows; ++i) {
-    cudaMemcpy(h_m, d_m, cols * sizeof(float), cudaMemcpyDeviceToHost);
-  }
-}
-
 void cpu_calculate(float *x, float *y, int rows, int cols, float *z) {
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < cols; ++j) {
@@ -57,14 +38,24 @@ void cpu_calculate(float *x, float *y, int rows, int cols, float *z) {
 
 void cpy_and_calculate(float *x, float *y, int rows, int cols) {
   // malloc and copy to device
-  // float *d_x, *d_y;
-  // cuda_malloc_matrix(d_x, rows, cols);
-  // cuda_malloc_matrix(d_y, rows, cols);
-  // cuda_h_to_d_memcpy(x, d_x, rows, cols);
+  float *d_x, *d_y;
+  int elements = rows * cols;
 
-  float *z = static_cast<float *>(malloc(rows * cols * sizeof(float)));
-  cpu_calculate(x, y, rows, cols, z);
-  print_matrix(z, rows, cols);
+  cudaMalloc((void **)&d_x, elements * sizeof(float));
+  cudaMalloc((void **)&d_y, elements * sizeof(float));
+  cudaMemcpy(d_x, x, elements, cudaMemcpyHostToDevice);
+
+  // CPU calculation
+  float *cpu_z = static_cast<float *>(malloc(rows * cols * sizeof(float)));
+  cpu_calculate(x, y, rows, cols, cpu_z);
+  print_matrix(cpu_z, rows, cols);
+
+  float *d_z;
+  cudaMalloc((void **)&d_z, elements * sizeof(float));
+
+  cudaFree(d_x);
+  cudaFree(d_y);
+  cudaFree(d_z);
 }
 
 int main(int argc, char *argv[]) {
