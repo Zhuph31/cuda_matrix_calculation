@@ -1,11 +1,46 @@
 #include <iostream>
+#include <sys/time.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 
 // #define NUM_BANKS 32
 // #define LOG_NUM_BANKS 5
 // #define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
 int block_size = 512;
+
+class TimeCost {
+  double get_timestamp() const {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_usec / 1000000 + tv.tv_sec;
+  }
+
+  double start_ts;
+
+public:
+  TimeCost() { start_ts = get_timestamp(); }
+  double get_elapsed() const { return get_timestamp() - start_ts; }
+};
+
+struct ExecRecord {
+  double total_gpu_time;
+  double cpu_gpu_transfer_time;
+  double kernel_time;
+  double gpu_cpu_transfer_time;
+  float z_value;
+  void print() const {
+    printf("%.6f %.6f %.6f %.6f %.6f\n", total_gpu_time, cpu_gpu_transfer_time,
+           kernel_time, gpu_cpu_transfer_time, z_value);
+  }
+};
+
+struct ExecRecords {
+  ExecRecord cpu_record;
+  struct GPURecords {
+    ExecRecord basic;
+  } gpu_records;
+};
 
 #define gpu_err_check(ans) gpu_err_check_impl((ans), __FILE__, __LINE__)
 inline void gpu_err_check_impl(cudaError_t code, const char *file, int line,
@@ -95,28 +130,22 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
     float elem4 = col < 2 ? 0 : y[row * cols + col - 2];
     float elem5 = col < 1 ? 0 : y[row * cols + col - 1];
     float elem6 = y[row * cols + col];
-    printf("idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
-           "elements:%lf,%lf,%lf,%lf,%lf,%lf\n",
-           idx, row, col, x[idx], y[row * cols + col], elem1, elem2, elem3,
-           elem4, elem5, elem6);
+    // printf("idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
+    //        "elements:%lf,%lf,%lf,%lf,%lf,%lf\n",
+    //        idx, row, col, x[idx], y[row * cols + col], elem1, elem2, elem3,
+    //        elem4, elem5, elem6);
 
     z[idx] = elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
   }
 }
 
-void cpy_and_calculate(float **x, float **y, int rows, int cols) {
-  printf("start cpu calculation\n");
+ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
+  ExecRecords records;
+
   // CPU calculation
   float **cpu_z;
   cpu_malloc(&cpu_z, rows, cols);
   cpu_calculate(x, y, rows, cols, cpu_z);
-  printf("debug cpu result\n");
-  print_matrix(cpu_z, rows, cols);
-  printf("cpu result finished\n\n");
-
-  print_matrix(x, rows, cols);
-  print_matrix(y, rows, cols);
-  printf("\n");
 
   // flatten matrix for gpu memcpy
   int elements = rows * cols;
@@ -126,7 +155,6 @@ void cpy_and_calculate(float **x, float **y, int rows, int cols) {
   flatten_matrix(y, &y_flat, rows, cols);
 
   // GPU calculation
-  printf("start gpu calculation\n");
   float *d_x, *d_y, *d_z;
 
   cudaMalloc((void **)&d_x, elements * sizeof(float));
@@ -134,18 +162,28 @@ void cpy_and_calculate(float **x, float **y, int rows, int cols) {
   cudaMalloc((void **)&d_z, elements * sizeof(float));
   float *h_z = (float *)malloc(elements * sizeof(float));
 
-  gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
-                           cudaMemcpyHostToDevice));
-  gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
-                           cudaMemcpyHostToDevice));
+  // basic execution
+  {
+    ExecRecord basic_record;
+    TimeCost total_gpu_time, cpu_gpu_transfer_time;
+    gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
+                             cudaMemcpyHostToDevice));
+    gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
+                             cudaMemcpyHostToDevice));
+    basic_record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
 
-  int grid_dim = (elements + block_size - 1) / block_size;
-  printf("grid_dim:%d\n", grid_dim);
-  basic_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols);
+    int grid_dim = (elements + block_size - 1) / block_size;
+    basic_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols);
 
-  cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
-  print_flat_matrix(h_z, rows, cols);
-  printf("gpu result finished\n");
+    TimeCost gpu_cpu_transfer_time;
+    cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
+    basic_record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
+
+    basic_record.total_gpu_time = total_gpu_time.get_elapsed();
+    basic_record.z_value = h_z[5 * cols + 5];
+
+    records.gpu_records.basic = basic_record;
+  }
 
   // check results
   float *cpu_res_flat = (float *)malloc(elements * sizeof(float));
@@ -156,6 +194,8 @@ void cpy_and_calculate(float **x, float **y, int rows, int cols) {
       exit(-1);
     }
   }
+  std::cout << "Verified, resuls matches.\n";
+
   free(cpu_res_flat);
   free(h_z);
   free(x_flat);
@@ -166,6 +206,8 @@ void cpy_and_calculate(float **x, float **y, int rows, int cols) {
   cudaFree(d_x);
   cudaFree(d_y);
   cudaFree(d_z);
+
+  return records;
 }
 
 int main(int argc, char *argv[]) {
@@ -208,7 +250,10 @@ int main(int argc, char *argv[]) {
   print_matrix(y, rows, cols);
   printf("print x and y finished\n\n");
 
-  cpy_and_calculate(x, y, rows, cols);
+  ExecRecords records = calculate_and_compare(x, y, rows, cols);
+
+  records.cpu_record.print();
+  records.gpu_records.basic.print();
 
   cpu_free(x, rows);
   cpu_free(y, rows);
