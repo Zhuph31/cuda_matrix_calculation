@@ -63,6 +63,19 @@ void flatten_matrix(float **matrix, float **vec, int rows, int cols) {
   }
 }
 
+void compare_flat_matrix(float *l, float *r, int rows, int cols) {
+  for (int i = 0; i < rows; ++i) {
+    for (int j = 0; j < cols; ++j) {
+      if (l[i * cols + j] != r[i * cols + j]) {
+        printf("\033[1;31m%.6f/%.6f,\033[0m", l[i * cols + j], r[i * cols + j]);
+      } else {
+        printf("\033[1;32m%.6f,\033[0m", l[i * cols + j]);
+      }
+    }
+    printf("\n");
+  }
+}
+
 void print_flat_matrix(float *v, int rows, int cols) {
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < cols; ++j) {
@@ -122,7 +135,7 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
   int idx = block_offset + thread_id;
 
   if (idx < rows * cols) {
-    int row = idx / rows, col = idx % rows;
+    int row = idx / cols, col = idx % cols;
 
     float elem1 = row == 0 ? 0 : x[(row - 1) * cols + col];
     float elem2 = x[row * cols + col];
@@ -160,9 +173,8 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
   flatten_matrix(x, &x_flat, rows, cols);
   flatten_matrix(y, &y_flat, rows, cols);
 
-  // GPU calculation
+  // GPU malloc
   float *d_x, *d_y, *d_z;
-
   cudaMalloc((void **)&d_x, elements * sizeof(float));
   cudaMalloc((void **)&d_y, elements * sizeof(float));
   cudaMalloc((void **)&d_z, elements * sizeof(float));
@@ -196,11 +208,12 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
   flatten_matrix(cpu_z, &cpu_res_flat, rows, cols);
   for (int idx = 0; idx < elements; ++idx) {
     if (cpu_res_flat[idx] != h_z[idx]) {
-      std::cerr << "Error: CPU and GPU result does not match\n";
+      printf("\033[1;31mError: CPU and GPU result does not match\n\033[0m\n");
+      compare_flat_matrix(cpu_res_flat, h_z, rows, cols);
       exit(-1);
     }
   }
-  std::cout << "Verified, resuls matches.\n";
+  printf("\033[1;32mVerifies, results match.\033[0m\n");
 
   free(cpu_res_flat);
   free(h_z);
@@ -250,11 +263,11 @@ int main(int argc, char *argv[]) {
 
   gen_matrix(rows, cols, x, y);
 
-  printf("\nprint x and y\n");
-  print_matrix(x, rows, cols);
-  printf("\n");
-  print_matrix(y, rows, cols);
-  printf("print x and y finished\n\n");
+  // printf("\nprint x and y\n");
+  // print_matrix(x, rows, cols);
+  // printf("\n");
+  // print_matrix(y, rows, cols);
+  // printf("print x and y finished\n\n");
 
   ExecRecords records = calculate_and_compare(x, y, rows, cols);
 
