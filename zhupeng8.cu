@@ -36,7 +36,7 @@ struct ExecRecord {
 };
 
 struct ExecRecords {
-  ExecRecord cpu_record;
+  double cpu_record;
   struct GPURecords {
     ExecRecord basic;
   } gpu_records;
@@ -139,13 +139,19 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
   }
 }
 
+double cpu_cal_and_record(float **x, float **y, int rows, int cols,
+                          float ***cpu_z) {
+  TimeCost cpu_tc;
+  cpu_malloc(cpu_z, rows, cols);
+  cpu_calculate(x, y, rows, cols, *cpu_z);
+  return cpu_tc.get_elapsed();
+}
+
 ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
   ExecRecords records;
 
-  // CPU calculation
   float **cpu_z;
-  cpu_malloc(&cpu_z, rows, cols);
-  cpu_calculate(x, y, rows, cols, cpu_z);
+  records.cpu_record = cpu_cal_and_record(x, y, rows, cols, &cpu_z);
 
   // flatten matrix for gpu memcpy
   int elements = rows * cols;
@@ -252,7 +258,7 @@ int main(int argc, char *argv[]) {
 
   ExecRecords records = calculate_and_compare(x, y, rows, cols);
 
-  records.cpu_record.print();
+  printf("%.6f\n", records.cpu_record);
   records.gpu_records.basic.print();
 
   cpu_free(x, rows);
