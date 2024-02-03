@@ -39,6 +39,7 @@ struct ExecRecords {
   double cpu_record;
   struct GPURecords {
     ExecRecord basic;
+    ExecRecord shared_memory;
   } gpu_records;
 };
 
@@ -152,12 +153,76 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
   }
 }
 
+__global__ void shared_memory_impl(const float *x, const float *y, float *z,
+                                   int rows, int cols, int block_elems) {
+  extern __shared__ int temp[];
+
+  int block_id = blockIdx.x;
+  int thread_id = threadIdx.x;
+  // int block_offset = block_id * blockDim.x;
+  int block_elem_offset = block_elems * block_id;
+  int idx = block_elem_offset + thread_id;
+
+  int x_offset = 0, y_offset = block_elems, z_offset = 2 * block_elems;
+
+  // only block elems number of threads, and idx cannot exceed total elements
+  if (thread_id < block_elems && idx < rows * cols) {
+    // copy data to shared memory
+    temp[x_offset + thread_id] = x[idx];
+    temp[y_offset + thread_id] = y[idx];
+
+    // calculate using shared memory
+    int row = idx / cols, col = idx % cols;
+    // float elem1 = row == 0 ? 0 : x[(row - 1) * cols + col];
+    // float elem2 = x[row * cols + col];
+    //     float elem3 = row == rows - 1 ? 0 : x[(row + 1) * cols + col];
+    //     float elem4 = col < 2 ? 0 : y[row * cols + col - 2];
+    //     float elem5 = col < 1 ? 0 : y[row * cols + col - 1];
+    //     float elem6 = y[row * cols + col];
+
+    float elem1 =
+        row == 0 ? 0
+                 : temp[x_offset + (row - 1) * cols + col - block_elem_offset];
+    float elem2 = temp[x_offset + row * cols + col - block_elem_offset];
+    float elem3 =
+        row == rows - 1
+            ? 0
+            : temp[x_offset + (row + 1) * cols + col - block_elem_offset];
+    float elem4 =
+        col < 2 ? 0 : temp[y_offset + row * cols + col - 2 - block_elem_offset];
+    float elem5 =
+        col < 1 ? 0 : temp[y_offset + row * cols + col - 1 - block_elem_offset];
+    float elem6 = temp[y_offset + row * cols + col - block_elem_offset];
+
+    temp[z_offset + idx - block_elem_offset] =
+        elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
+
+    // copy back to globak memory
+    z[idx] = temp[z_offset + idx - block_elem_offset];
+  }
+}
+
 double cpu_cal_and_record(float **x, float **y, int rows, int cols,
                           float ***cpu_z) {
   TimeCost cpu_tc;
   cpu_malloc(cpu_z, rows, cols);
   cpu_calculate(x, y, rows, cols, *cpu_z);
   return cpu_tc.get_elapsed();
+}
+
+void check_results(float **cpu_z, float *h_z, int rows, int cols,
+                   int elements) {
+  float *cpu_res_flat = (float *)malloc(elements * sizeof(float));
+  flatten_matrix(cpu_z, &cpu_res_flat, rows, cols);
+  for (int idx = 0; idx < elements; ++idx) {
+    if (cpu_res_flat[idx] != h_z[idx]) {
+      printf("\033[1;31mError: CPU and GPU result does not match\n\033[0m\n");
+      compare_flat_matrix(cpu_res_flat, h_z, rows, cols);
+      exit(-1);
+    }
+  }
+  printf("\033[1;32mVerifies, results match.\033[0m\n");
+  free(cpu_res_flat);
 }
 
 ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
@@ -182,40 +247,61 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
   // basic execution
   {
-    ExecRecord basic_record;
+    ExecRecord record;
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
     gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
                              cudaMemcpyHostToDevice));
     gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
                              cudaMemcpyHostToDevice));
-    basic_record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
+    record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
 
     int grid_dim = (elements + block_size - 1) / block_size;
+    TimeCost kernel_time;
     basic_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols);
+    cudaDeviceSynchronize();
+    record.kernel_time = kernel_time.get_elapsed();
 
     TimeCost gpu_cpu_transfer_time;
     cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
-    basic_record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
+    record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
 
-    basic_record.total_gpu_time = total_gpu_time.get_elapsed();
-    basic_record.z_value = h_z[5 * cols + 5];
+    record.total_gpu_time = total_gpu_time.get_elapsed();
+    record.z_value = h_z[5 * cols + 5];
 
-    records.gpu_records.basic = basic_record;
+    records.gpu_records.basic = record;
+
+    check_results(cpu_z, h_z, rows, cols, elements);
   }
 
-  // check results
-  float *cpu_res_flat = (float *)malloc(elements * sizeof(float));
-  flatten_matrix(cpu_z, &cpu_res_flat, rows, cols);
-  for (int idx = 0; idx < elements; ++idx) {
-    if (cpu_res_flat[idx] != h_z[idx]) {
-      printf("\033[1;31mError: CPU and GPU result does not match\n\033[0m\n");
-      compare_flat_matrix(cpu_res_flat, h_z, rows, cols);
-      exit(-1);
-    }
-  }
-  printf("\033[1;32mVerifies, results match.\033[0m\n");
+  // shared memory
+  {
+    ExecRecord record;
+    TimeCost total_gpu_time, cpu_gpu_transfer_time;
+    gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
+                             cudaMemcpyHostToDevice));
+    gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
+                             cudaMemcpyHostToDevice));
+    record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
 
-  free(cpu_res_flat);
+    int grid_dim = (elements + block_size - 1) / block_size;
+    TimeCost kernel_time;
+    shared_memory_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols,
+                                                 block_size / 3);
+    cudaDeviceSynchronize();
+    record.kernel_time = kernel_time.get_elapsed();
+
+    TimeCost gpu_cpu_transfer_time;
+    cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
+    record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
+
+    record.total_gpu_time = total_gpu_time.get_elapsed();
+    record.z_value = h_z[5 * cols + 5];
+
+    records.gpu_records.shared_memory = record;
+
+    check_results(cpu_z, h_z, rows, cols, elements);
+  }
+
   free(h_z);
   free(x_flat);
   free(y_flat);
@@ -273,6 +359,7 @@ int main(int argc, char *argv[]) {
 
   printf("%.6f\n", records.cpu_record);
   records.gpu_records.basic.print();
+  records.gpu_records.shared_memory.print();
 
   cpu_free(x, rows);
   cpu_free(y, rows);
