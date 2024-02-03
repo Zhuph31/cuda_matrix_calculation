@@ -14,7 +14,6 @@ void print_matrix(float **m, int rows, int cols) {
 void gen_matrix(int rows, int cols, float **x, float **y) {
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < cols; ++j) {
-      printf("%d,%d\n", i, j);
       x[i][j] = (float)((i + j) % 100) / 2.0;
       y[i][j] = (float)3.25 * ((i + j) % 100);
     }
@@ -45,10 +44,34 @@ void cpu_calculate(float **x, float **y, int rows, int cols, float **z) {
   }
 }
 
+void cuda_malloc_matrix(float **m, int rows, int cols) {
+  cudaMalloc((void ***)&m, rows * sizeof(float *));
+  for (int i = 0; i < rows; ++i) {
+    cudaMalloc((void **)&(m[i]), cols * sizeof(float));
+  }
+}
+
+void cuda_free_matrix(float **m, int rows) {
+  for (int i = 0; i < rows; ++i) {
+    cudaFree(m[i]);
+  }
+  cudaFree(m);
+}
+
+void cuda_h_to_d_memcpy(float **d_m, float **h_m, int rows, int cols) {
+  for (int i = 0; i < rows; ++i) {
+    cudaMemcpy(d_m, h_m, cols * sizeof(float), cudaMemcpyHostToDevice);
+  }
+}
+
+void cuda_d_to_h_memcpy(float **h_m, float **d_m, int rows, int cols) {
+  for (int i = 0; i < rows; ++i) {
+    cudaMemcpy(h_m, d_m, cols * sizeof(float), cudaMemcpyDeviceToHost);
+  }
+}
+
 void cpy_and_calculate(float **x, float **y, int rows, int cols) {
-  // malloc and copy to device
-  float **d_x, **d_y;
-  int elements = rows * cols;
+  printf("start cpu calculation\n");
 
   // CPU calculation
   float **cpu_z;
@@ -57,12 +80,25 @@ void cpy_and_calculate(float **x, float **y, int rows, int cols) {
   print_matrix(cpu_z, rows, cols);
   cpu_free(cpu_z, rows);
 
-  // float *d_z;
-  // cudaMalloc((void **)&d_z, elements * sizeof(float));
+  // GPU calculation
+  float **d_x, **d_y, **d_z;
+  cuda_malloc_matrix(d_x, rows, cols);
+  cuda_malloc_matrix(d_y, rows, cols);
+  cuda_malloc_matrix(d_z, rows, cols);
 
-  // cudaFree(d_x);
-  // cudaFree(d_y);
-  // cudaFree(d_z);
+  cuda_h_to_d_memcpy(d_x, x, rows, cols);
+  cuda_h_to_d_memcpy(d_y, y, rows, cols);
+
+  float **test;
+  cpu_malloc(&test, rows, cols);
+
+  cuda_d_to_h_memcpy(test, d_x, rows, cols);
+  printf("print test\n");
+  print_matrix(test, rows, cols);
+
+  cudaFree(d_x);
+  cudaFree(d_y);
+  cudaFree(d_z);
 }
 
 int main(int argc, char *argv[]) {
@@ -102,6 +138,8 @@ int main(int argc, char *argv[]) {
 
   print_matrix(x, rows, cols);
   print_matrix(y, rows, cols);
+
+  cpy_and_calculate(x, y, rows, cols);
 
   cpu_free(x, rows);
   cpu_free(y, rows);
