@@ -318,9 +318,9 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       cols_in_streams = (cols + elements_per_stream - 1) / elements_per_stream;
       rows_in_streams = rows;
     } else {
-      // if elements per stream is more than elements per row, we cut elements
+      // if elements per stream is more than elements per row, we ceil elements
       // per stream to the nearest multiple of elements per row
-      elements_per_stream -= elements_per_stream % cols;
+      elements_per_stream += cols - (elements_per_stream % cols);
       cols_in_streams = 1;
       int rows_per_stream = elements_per_stream / cols;
       rows_in_streams = (rows + rows_per_stream - 1) / rows_per_stream;
@@ -329,10 +329,8 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     printf("elements_per_stream:%d, rows_in_streams:%d, cols_in_streams:%d\n",
            elements_per_stream, rows_in_streams, cols_in_streams);
 
-    // craete stream
+    // craete streams
     cudaStream_t stream[n_stream + 1];
-    for (int i = 1; i <= n_stream; ++i) {
-    }
 
     // start streams & copy
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
