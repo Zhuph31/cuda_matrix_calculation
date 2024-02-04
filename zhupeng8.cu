@@ -347,7 +347,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     // start streams & copy
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
     for (int i = 1; i <= n_stream; ++i) {
-      printf("ranging for i:%d\n", i);
+      // printf("ranging for i:%d\n", i);
       cudaStreamCreate(&stream[i]);
       int begin_elem_offset = (i - 1) * elements_per_stream;
 
@@ -370,7 +370,8 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                         cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
         cudaMemcpyAsync(&(d_y[begin_elem_offset]), &(y_flat[begin_elem_offset]),
                         cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
-        check_kernel_err();
+        // check_kernel_err();
+        cudaStreamSynchronize(stream[i]);
 
 #ifdef DEBUG
         printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
@@ -381,10 +382,10 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       }
 
       // launch the kernel for the previous stream
-      printf("checking kernel launch for i:%d\n", i);
+      // printf("checking kernel launch for i:%d\n", i);
       if (i > 1 && streams_elements[i - 1] > 0) {
         int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
-        printf("starting kernel for stream:%d\n", i - 1);
+        // printf("starting kernel for stream:%d\n", i - 1);
         basic_impl<<<grid_dim, block_size, 0, stream[i - 1]>>>(
             d_x, d_y, d_z, rows, cols, i - 1, streams_begin_elem_offset[i - 1],
             streams_elements[i - 1]);
@@ -409,10 +410,14 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       }
     }
 
-    for (int i = 1; i <= n_stream; i++) {
+    // ! when the current stream launch kernel, the last stream may have not
+    // ! finished memcpy
+
+    for (int i = 1; i <= n_stream; ++i) {
       // printf("Synchronizing stream %d\n", i);
       cudaStreamSynchronize(stream[i]);
     }
+    // cudaDeviceSynchronize();
 
     record.total_gpu_time = total_gpu_time.get_elapsed();
     record.z_value = h_z[5 * cols + 5];
