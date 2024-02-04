@@ -9,7 +9,7 @@
 // #define LOG_NUM_BANKS 5
 // #define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
 int block_size = 1024;
-int n_stream = 10;
+int n_stream = 5;
 
 class TimeCost {
   double get_timestamp() const {
@@ -189,149 +189,6 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
 #endif
 }
 
-__global__ void shared_memory_impl(const float *x, const float *y, float *z,
-                                   int rows, int cols, int elements) {
-  extern __shared__ float temp[];
-
-  int block_id = blockIdx.x;
-  int thread_id = threadIdx.x;
-  int block_offset = block_id * blockDim.x;
-  int idx = block_offset + thread_id;
-
-  // tiling, 6 times z elements size
-
-  int x1_offset = 0, x2_offset = elements, x3_offset = 2 * elements,
-      y1_offset = 3 * elements, y2_offset = 4 * elements,
-      y3_offset = 5 * elements;
-
-  if (idx < rows * cols) {
-    int row = idx / cols, col = idx % cols;
-
-    // copy data to shared memory
-    temp[x1_offset + thread_id] = row == 0 ? 0 : x[(row - 1) * cols + col];
-    temp[x2_offset + thread_id] = x[row * cols + col];
-    temp[x3_offset + thread_id] =
-        row >= rows - 1 ? 0 : x[(row + 1) * cols + col];
-    temp[y1_offset + thread_id] = col < 2 ? 0 : y[row * cols + col - 2];
-    temp[y2_offset + thread_id] = col < 1 ? 0 : y[row * cols + col - 1];
-    temp[y3_offset + thread_id] = y[row * cols + col];
-
-#ifdef DEBUG
-    printf("idx:%d, row:%d, col:%d, copy:%lf, %lf, %lf, %lf, %lf, %lf\n", idx,
-           row, col, temp[x1_offset + thread_id], temp[x2_offset + thread_id],
-           temp[x3_offset + thread_id], temp[y1_offset + thread_id],
-           temp[y2_offset + thread_id], temp[y3_offset + thread_id]);
-#endif
-
-    // copy back to global memory
-    z[idx] = temp[x1_offset + thread_id] + temp[x2_offset + thread_id] +
-             temp[x3_offset + thread_id] - temp[y1_offset + thread_id] -
-             temp[y2_offset + thread_id] - temp[y3_offset + thread_id];
-  }
-}
-
-__global__ void shared_tiling_impl(const float *x, const float *y, float *z,
-                                   int rows, int cols, int inc_rows,
-                                   int inc_cols) {
-  extern __shared__ float temp[];
-
-  int block_id = blockIdx.x;
-  int thread_id = threadIdx.x;
-
-  int tile_id = block_id;
-  int total_tile_rows = (rows + inc_rows - 1) / inc_rows,
-      total_tile_cols = (cols + inc_cols - 1) / inc_cols;
-  int tile_row = tile_id / total_tile_cols,
-      tile_col = tile_id % total_tile_cols;
-
-  int tile_inner_row = thread_id / cols,
-      tile_inner_col =
-          thread_id % cols; // relative row & col inside current tile
-  int tile_row_offset = tile_row * inc_rows,
-      tile_col_offset = tile_col * inc_cols; // offset of tile begin row and col
-  int global_row = tile_row_offset + tile_inner_row,
-      global_col =
-          tile_col_offset + tile_inner_col; // row and col in global matrix
-
-#ifdef DEBUG
-  if (thread_id == 0) {
-    printf("block_id:%d, total_tile_rows:%d, total_tile_cols:%d, tile_row:%d, "
-           "tile_col:%d, tile_row_offset:%d, tile_col_offset:%d, inc_rows:%d, "
-           "inc_cols:%d\n",
-           block_id, total_tile_rows, total_tile_cols, tile_row, tile_col,
-           tile_row_offset, tile_col_offset, inc_rows, inc_cols);
-  }
-  __syncthreads();
-  if (global_row >= 0 && global_row < rows && global_col >= 0 &&
-      global_col < cols) {
-    printf("thread_id:%d, tile_inner_row:%d, tile_inner_col:%d, global_row:%d, "
-           "global_col:%d\n",
-           thread_id, tile_inner_row, tile_inner_col, global_row, global_col);
-  }
-#endif
-
-  int z_elems = inc_rows * inc_cols;
-  int x_offset = 0, x1_offset = z_elems, x2_offset = x1_offset + inc_cols,
-      y_offset = x2_offset + inc_cols, y1_offset = y_offset + z_elems,
-      y2_offset = y1_offset + inc_rows;
-
-  // copy to shared memory
-  if (global_row >= 0 && global_row < rows && global_col >= 0 &&
-      global_col < cols) {
-    int global_idx = global_row * cols + global_col;
-    int tile_inner_idx = tile_inner_row * total_tile_cols + tile_inner_col;
-
-    // copy main matrix
-    temp[x_offset + tile_inner_idx] = x[global_idx];
-    temp[y_offset + tile_inner_idx] = y[global_idx];
-
-    // copy extra 2 rows
-    if (tile_inner_row == 0) {
-      temp[x1_offset + tile_inner_idx] =
-          global_row == 0 ? 0 : x[(global_row - 1) * cols + global_col];
-    } else if (tile_inner_row == inc_rows - 1) {
-      temp[x2_offset + tile_inner_idx] =
-          global_row == rows - 1 ? 0 : x[(global_row + 1) * cols + global_col];
-    }
-
-    // copy extra 2 cols
-    if (tile_inner_col == 0) {
-      temp[y1_offset + tile_inner_idx] =
-          global_col < 2 ? 0 : x[global_row * cols + global_col - 2];
-      temp[y2_offset + tile_inner_idx] =
-          global_col < 1 ? 0 : x[global_row * cols + global_col - 1];
-    }
-
-    // get 6 elements
-    float elem1 = tile_inner_row == 0
-                      ? temp[x1_offset + tile_inner_col]
-                      : temp[x_offset + (tile_inner_row - 1) * total_tile_cols +
-                             tile_inner_col];
-    float elem2 = temp[x_offset + tile_inner_idx];
-    float elem3 = tile_inner_row == inc_rows - 1
-                      ? temp[x2_offset + tile_inner_col]
-                      : temp[x_offset + (tile_inner_row + 1) * total_tile_cols +
-                             tile_inner_col];
-    float elem4 = tile_inner_col < 2 ? temp[y1_offset + tile_inner_row]
-                                     : temp[y_offset + tile_inner_idx - 2];
-    float elem5 = tile_inner_col < 1 ? temp[y2_offset + tile_inner_row]
-                                     : temp[y_offset + tile_inner_idx - 1];
-    float elem6 = temp[y_offset + tile_inner_idx];
-
-#ifdef DEBUG
-    printf(
-        "global_idx:%d, global_row:%d, global_col:%d, tile_inner_row:%d, "
-        "tile_inner_col:%d, inc_rows:%d, inc_cols:%d, copy:%lf, %lf, %lf, %lf, "
-        "%lf, %lf\n",
-        global_idx, global_row, global_col, tile_inner_row, tile_inner_col,
-        inc_rows, inc_cols, elem1, elem2, elem3, elem4, elem5, elem6);
-#endif
-
-    // write directly into global memory
-    z[global_idx] = elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
-  }
-}
-
 double cpu_cal_and_record(float **x, float **y, int rows, int cols,
                           float ***cpu_z) {
   TimeCost cpu_tc;
@@ -379,47 +236,47 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
   flatten_matrix(y, &y_flat, rows, cols);
 
   // basic execution
-  {
-    // GPU malloc
-    float *d_x, *d_y, *d_z;
-    cudaMalloc((void **)&d_x, elements * sizeof(float));
-    cudaMalloc((void **)&d_y, elements * sizeof(float));
-    cudaMalloc((void **)&d_z, elements * sizeof(float));
+  // {
+  //   // GPU malloc
+  //   float *d_x, *d_y, *d_z;
+  //   cudaMalloc((void **)&d_x, elements * sizeof(float));
+  //   cudaMalloc((void **)&d_y, elements * sizeof(float));
+  //   cudaMalloc((void **)&d_z, elements * sizeof(float));
 
-    float *h_z;
-    cudaMallocHost((void **)&h_z, elements * sizeof(float),
-                   cudaHostAllocWriteCombined);
+  //   float *h_z;
+  //   cudaMallocHost((void **)&h_z, elements * sizeof(float),
+  //                  cudaHostAllocWriteCombined);
 
-    ExecRecord record;
-    TimeCost total_gpu_time, cpu_gpu_transfer_time;
-    gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
-                             cudaMemcpyHostToDevice));
-    gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
-                             cudaMemcpyHostToDevice));
-    record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
+  //   ExecRecord record;
+  //   TimeCost total_gpu_time, cpu_gpu_transfer_time;
+  //   gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
+  //                            cudaMemcpyHostToDevice));
+  //   gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
+  //                            cudaMemcpyHostToDevice));
+  //   record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
 
-    int grid_dim = (elements + block_size - 1) / block_size;
-    TimeCost kernel_time;
-    basic_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols, 0, 0,
-                                         elements);
-    record.kernel_time = kernel_time.get_elapsed();
+  //   int grid_dim = (elements + block_size - 1) / block_size;
+  //   TimeCost kernel_time;
+  //   basic_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols, 0, 0,
+  //                                        elements);
+  //   record.kernel_time = kernel_time.get_elapsed();
 
-    TimeCost gpu_cpu_transfer_time;
-    cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
-    record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
+  //   TimeCost gpu_cpu_transfer_time;
+  //   cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
+  //   record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
 
-    record.total_gpu_time = total_gpu_time.get_elapsed();
-    record.z_value = h_z[5 * cols + 5];
+  //   record.total_gpu_time = total_gpu_time.get_elapsed();
+  //   record.z_value = h_z[5 * cols + 5];
 
-    records.gpu_records.basic = record;
+  //   records.gpu_records.basic = record;
 
-    check_results(cpu_z, h_z, rows, cols, elements, "basic");
+  //   check_results(cpu_z, h_z, rows, cols, elements, "basic");
 
-    cudaFree(d_z);
-    cudaFree(d_x);
-    cudaFree(d_y);
-    cudaFree(h_z);
-  }
+  //   cudaFree(d_z);
+  //   cudaFree(d_x);
+  //   cudaFree(d_y);
+  //   cudaFree(h_z);
+  // }
 
   // basic + streaming memcpy
   {
