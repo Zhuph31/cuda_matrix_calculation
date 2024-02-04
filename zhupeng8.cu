@@ -334,9 +334,15 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     cudaStream_t stream[n_stream + 1];
 
     // find the actual number of streams that should be started
-    // for (int i = 1; i <= n_stream; ++i) {
-    //   int begin_elem_offset = (i - 1) * elements_per_stream;
-    // }
+    int needed_stream_num = n_stream;
+    for (int i = 1; i <= n_stream; ++i) {
+      int begin_elem_offset = (i - 1) * elements_per_stream;
+      if (begin_elem_offset >= elements) {
+        needed_stream_num = i - 1;
+        break;
+      }
+    }
+    printf("needed stream num:%d\n", needed_stream_num);
 
     // start streams & copy
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
@@ -345,39 +351,38 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       cudaStreamCreate(&stream[i]);
       int begin_elem_offset = (i - 1) * elements_per_stream;
 
-      if (begin_elem_offset >= elements) {
+      if (begin_elem_offset < elements) {
         // printf("abort creating stream %d cause not needed\n", i);
-        continue;
-      }
 
-      int cur_stream_elements = elements_per_stream;
-      if (begin_elem_offset + cur_stream_elements >= elements) {
-        cur_stream_elements = elements - begin_elem_offset;
-      }
+        int cur_stream_elements = elements_per_stream;
+        if (begin_elem_offset + cur_stream_elements >= elements) {
+          cur_stream_elements = elements - begin_elem_offset;
+        }
 
-      int begin_byte_offset = begin_elem_offset * sizeof(float),
-          cur_stream_bytes = cur_stream_elements * sizeof(float);
-      streams_begin_elem_offset[i] = begin_elem_offset;
-      streams_begin_byte_offset[i] = begin_byte_offset;
-      streams_elements[i] = cur_stream_elements;
-      streams_bytes[i] = cur_stream_bytes;
+        int begin_byte_offset = begin_elem_offset * sizeof(float),
+            cur_stream_bytes = cur_stream_elements * sizeof(float);
+        streams_begin_elem_offset[i] = begin_elem_offset;
+        streams_begin_byte_offset[i] = begin_byte_offset;
+        streams_elements[i] = cur_stream_elements;
+        streams_bytes[i] = cur_stream_bytes;
 
-      cudaMemcpyAsync(&(d_x[begin_elem_offset]), &(x_flat[begin_elem_offset]),
-                      cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
-      cudaMemcpyAsync(&(d_y[begin_elem_offset]), &(y_flat[begin_elem_offset]),
-                      cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
-      check_kernel_err();
+        cudaMemcpyAsync(&(d_x[begin_elem_offset]), &(x_flat[begin_elem_offset]),
+                        cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
+        cudaMemcpyAsync(&(d_y[begin_elem_offset]), &(y_flat[begin_elem_offset]),
+                        cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
+        check_kernel_err();
 
 #ifdef DEBUG
-      printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
-             "begin_byte_offset:%d, cur_stream_bytes:%d\n",
-             i, begin_elem_offset, cur_stream_elements, begin_byte_offset,
-             cur_stream_bytes);
+        printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
+               "begin_byte_offset:%d, cur_stream_bytes:%d\n",
+               i, begin_elem_offset, cur_stream_elements, begin_byte_offset,
+               cur_stream_bytes);
 #endif
+      }
 
       // launch the kernel for the previous stream
-      printf("checking kernel launch for i:%d", i);
-      if (i > 1) {
+      printf("checking kernel launch for i:%d\n", i);
+      if (i > 1 && streams_elements[i - 1] > 0) {
         int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
         printf("starting kernel for stream:%d\n", i - 1);
         basic_impl<<<grid_dim, block_size, 0, stream[i - 1]>>>(
@@ -388,6 +393,19 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                         &d_z[streams_begin_elem_offset[i - 1]],
                         streams_bytes[i - 1], cudaMemcpyDeviceToHost,
                         stream[i - 1]);
+      }
+
+      // extra check for last stream
+      if (i == n_stream && streams_elements[i] > 0) {
+        int grid_dim = (streams_elements[i] + block_size - 1) / block_size;
+        printf("starting kernel for stream:%d\n", i);
+        basic_impl<<<grid_dim, block_size, 0, stream[i]>>>(
+            d_x, d_y, d_z, rows, cols, i, streams_begin_elem_offset[i],
+            streams_elements[i]);
+        check_kernel_err();
+        cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i]],
+                        &d_z[streams_begin_elem_offset[i]], streams_bytes[i],
+                        cudaMemcpyDeviceToHost, stream[i]);
       }
     }
 
