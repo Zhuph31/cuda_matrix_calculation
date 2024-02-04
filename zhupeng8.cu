@@ -326,20 +326,27 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       rows_in_streams = (rows + rows_per_stream - 1) / rows_per_stream;
     }
 
-    printf("elements_per_stream:%d, rows_in_streams:%d, cols_in_streams:%d\n",
-           elements_per_stream, rows_in_streams, cols_in_streams);
+    // printf("elements_per_stream:%d, rows_in_streams:%d,
+    // cols_in_streams:%d\n",
+    //        elements_per_stream, rows_in_streams, cols_in_streams);
 
     // craete streams
     cudaStream_t stream[n_stream + 1];
 
+    // find the actual number of streams that should be started
+    // for (int i = 1; i <= n_stream; ++i) {
+    //   int begin_elem_offset = (i - 1) * elements_per_stream;
+    // }
+
     // start streams & copy
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
     for (int i = 1; i <= n_stream; ++i) {
+      printf("ranging for i:%d\n", i);
       cudaStreamCreate(&stream[i]);
       int begin_elem_offset = (i - 1) * elements_per_stream;
 
       if (begin_elem_offset >= elements) {
-        printf("abort creating stream %d cause not needed\n", i);
+        // printf("abort creating stream %d cause not needed\n", i);
         continue;
       }
 
@@ -367,27 +374,21 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
              i, begin_elem_offset, cur_stream_elements, begin_byte_offset,
              cur_stream_bytes);
 #endif
-    }
 
-    for (int i = 1; i <= n_stream; ++i) {
-      printf("Synchronizing stream %d\n", i);
-      cudaStreamSynchronize(stream[i]);
-    }
-
-    record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
-
-    TimeCost kernel_time;
-
-    for (int i = 1; i <= n_stream; i++) {
-      int grid_dim = (elements_per_stream + block_size - 1) / block_size;
-      printf("starting kernel for stream:%d\n", i);
-      basic_impl<<<grid_dim, block_size, 0, stream[i]>>>(
-          d_x, d_y, d_z, rows, cols, i, streams_begin_elem_offset[i],
-          streams_elements[i]);
-      check_kernel_err();
-      cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i]],
-                      &d_z[streams_begin_elem_offset[i]], streams_bytes[i],
-                      cudaMemcpyDeviceToHost, stream[i]);
+      // launch the kernel for the previous stream
+      printf("checking kernel launch for i:%d", i);
+      if (i > 1) {
+        int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
+        printf("starting kernel for stream:%d\n", i - 1);
+        basic_impl<<<grid_dim, block_size, 0, stream[i - 1]>>>(
+            d_x, d_y, d_z, rows, cols, i - 1, streams_begin_elem_offset[i - 1],
+            streams_elements[i - 1]);
+        check_kernel_err();
+        cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i - 1]],
+                        &d_z[streams_begin_elem_offset[i - 1]],
+                        streams_bytes[i - 1], cudaMemcpyDeviceToHost,
+                        stream[i - 1]);
+      }
     }
 
     for (int i = 1; i <= n_stream; i++) {
@@ -396,7 +397,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     }
 
     record.total_gpu_time = total_gpu_time.get_elapsed();
-    record.kernel_time = kernel_time.get_elapsed();
     record.z_value = h_z[5 * cols + 5];
 
     records.gpu_records.basic_streaming = record;
