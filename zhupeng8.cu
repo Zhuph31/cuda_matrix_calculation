@@ -9,7 +9,7 @@
 // #define LOG_NUM_BANKS 5
 // #define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
 int block_size = 1024;
-int n_stream = 5;
+int n_stream = 10;
 
 class TimeCost {
   double get_timestamp() const {
@@ -158,6 +158,9 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
   int elements = rows * cols;
   if (thread_id >= stream_elements || stream_elements <= 0 ||
       stream_elem_offset >= elements) {
+    if (thread_id == 0) {
+      printf("stream id:%d, skip kernel execution\n", stream_id);
+    }
     return;
   }
 
@@ -167,6 +170,9 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
 #ifdef DEBUG
   if (idx == 0) {
     printf("rows:%d, cols:%d\n", rows, cols);
+  }
+  if (thread_id == 0) {
+    printf("stream %d executing kernel\n", stream_id);
   }
 #endif
 
@@ -182,10 +188,11 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
   z[idx] = elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
 
 #ifdef DEBUG
-  printf("stream:%d, idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
-         "elements:%lf,%lf,%lf,%lf,%lf,%lf, z_elem:%lf\n",
-         stream_id, idx, row, col, x[idx], y[idx], elem1, elem2, elem3, elem4,
-         elem5, elem6, z[idx]);
+  printf(
+      "basic debug stream:%d, idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
+      "elements:%lf,%lf,%lf,%lf,%lf,%lf, z_elem:%lf\n",
+      stream_id, idx, row, col, x[idx], y[idx], elem1, elem2, elem3, elem4,
+      elem5, elem6, z[idx]);
 #endif
 }
 
@@ -292,7 +299,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     ExecRecord record;
 
-    cudaStream_t stream[n_stream + 1];
     std::vector<int> streams_begin_elem_offset(n_stream + 1, 0),
         streams_elements(n_stream + 1, 0),
         streams_begin_byte_offset(n_stream + 1, 0),
@@ -301,16 +307,41 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     int elements_per_stream = (elements + n_stream - 1) / n_stream;
     // printf("elements per stream:%d\n", elements_per_stream);
 
+    // ? make each stream at least process 1 row, could be less effective for
+    // ? small rows big cols
+    elements_per_stream =
+        elements_per_stream < cols ? cols : elements_per_stream;
+
+    int rows_in_streams, cols_in_streams;
+
+    if (elements_per_stream <= cols) {
+      cols_in_streams = (cols + elements_per_stream - 1) / elements_per_stream;
+      rows_in_streams = rows;
+    } else {
+      // if elements per stream is more than elements per row, we cut elements
+      // per stream to the nearest multiple of elements per row
+      elements_per_stream -= elements_per_stream % cols;
+      cols_in_streams = 1;
+      int rows_per_stream = elements_per_stream / cols;
+      rows_in_streams = (rows + rows_per_stream - 1) / rows_per_stream;
+    }
+
+    printf("elements_per_stream:%d, rows_in_streams:%d, cols_in_streams:%d\n",
+           elements_per_stream, rows_in_streams, cols_in_streams);
+
+    // craete stream
+    cudaStream_t stream[n_stream + 1];
+    for (int i = 1; i <= n_stream; ++i) {
+    }
+
     // start streams & copy
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
     for (int i = 1; i <= n_stream; ++i) {
       cudaStreamCreate(&stream[i]);
-      // printf("stream %d created\n", i);
-
       int begin_elem_offset = (i - 1) * elements_per_stream;
 
       if (begin_elem_offset >= elements) {
-        // printf("abort creating stream %d cause not needed\n", i);
+        printf("abort creating stream %d cause not needed\n", i);
         continue;
       }
 
@@ -330,6 +361,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                       cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
       cudaMemcpyAsync(&(d_y[begin_elem_offset]), &(y_flat[begin_elem_offset]),
                       cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
+      check_kernel_err();
 
 #ifdef DEBUG
       printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
@@ -339,8 +371,8 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 #endif
     }
 
-    for (int i = 0; i <= n_stream; ++i) {
-      // printf("Synchronizing stream %d\n", i);
+    for (int i = 1; i <= n_stream; ++i) {
+      printf("Synchronizing stream %d\n", i);
       cudaStreamSynchronize(stream[i]);
     }
 
@@ -350,15 +382,17 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     for (int i = 1; i <= n_stream; i++) {
       int grid_dim = (elements_per_stream + block_size - 1) / block_size;
+      printf("starting kernel for stream:%d\n", i);
       basic_impl<<<grid_dim, block_size, 0, stream[i]>>>(
           d_x, d_y, d_z, rows, cols, i, streams_begin_elem_offset[i],
           streams_elements[i]);
+      check_kernel_err();
       cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i]],
                       &d_z[streams_begin_elem_offset[i]], streams_bytes[i],
                       cudaMemcpyDeviceToHost, stream[i]);
     }
 
-    for (int i = 0; i <= n_stream; i++) {
+    for (int i = 1; i <= n_stream; i++) {
       // printf("Synchronizing stream %d\n", i);
       cudaStreamSynchronize(stream[i]);
     }
