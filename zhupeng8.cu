@@ -31,6 +31,13 @@ struct ExecRecord {
   double kernel_time;
   double gpu_cpu_transfer_time;
   float z_value;
+  ExecRecord() {
+    total_gpu_time = -1;
+    cpu_gpu_transfer_time = -1;
+    kernel_time = -1;
+    gpu_cpu_transfer_time = -1;
+    z_value = -1;
+  }
   void print() const {
     printf("%.6f %.6f %.6f %.6f %.6f\n", total_gpu_time, cpu_gpu_transfer_time,
            kernel_time, gpu_cpu_transfer_time, z_value);
@@ -411,50 +418,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     cudaFree(d_z);
   }
 
-  // shared memory
-  // {
-  //   // GPU malloc
-  //   float *d_x, *d_y, *d_z;
-  //   cudaMalloc((void **)&d_x, elements * sizeof(float));
-  //   cudaMalloc((void **)&d_y, elements * sizeof(float));
-  //   cudaMalloc((void **)&d_z, elements * sizeof(float));
-  //   float *h_z = (float *)malloc(elements * sizeof(float));
-
-  //   ExecRecord record;
-  //   TimeCost total_gpu_time, cpu_gpu_transfer_time;
-  //   gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
-  //                            cudaMemcpyHostToDevice));
-  //   gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
-  //                            cudaMemcpyHostToDevice));
-  //   record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
-
-  //   int grid_dim = (elements + block_size - 1) / block_size;
-  //   TimeCost kernel_time;
-  //   shared_memory_impl<<<grid_dim, block_size,
-  //                        block_size * 6 * sizeof(float)>>>(d_x, d_y, d_z,
-  //                        rows,
-  //                                                          cols, block_size);
-  //   cudaDeviceSynchronize();
-  //   check_kernel_err();
-  //   record.kernel_time = kernel_time.get_elapsed();
-
-  //   TimeCost gpu_cpu_transfer_time;
-  //   cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
-  //   record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
-
-  //   record.total_gpu_time = total_gpu_time.get_elapsed();
-  //   record.z_value = h_z[5 * cols + 5];
-
-  //   records.gpu_records.shared_memory = record;
-
-  //   check_results(cpu_z, h_z, rows, cols, elements, "shared");
-
-  //   free(h_z);
-  //   cudaFree(d_x);
-  //   cudaFree(d_y);
-  //   cudaFree(d_z);
-  // }
-
   // basic + streaming memcpy
   {
     // GPU malloc
@@ -470,7 +433,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     cudaHostRegister(h_z, elements * sizeof(float), 0);
 
     ExecRecord record;
-    TimeCost total_gpu_time, cpu_gpu_transfer_time;
 
     cudaStream_t stream[n_stream + 1];
     std::vector<int> streams_begin_elem_offset(n_stream + 1, 0),
@@ -478,14 +440,13 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
         streams_begin_byte_offset(n_stream + 1, 0),
         streams_bytes(n_stream + 1, 0);
 
-    printf("starting multiple streams\n");
-
     int elements_per_stream = (elements + n_stream - 1) / n_stream;
-    printf("elements per stream:%d\n", elements_per_stream);
+    // printf("elements per stream:%d\n", elements_per_stream);
     // elements_per_stream = elements_per_stream < 100 ? 100 :
     // elements_per_stream;
 
     // start streams & copy
+    TimeCost total_gpu_time, cpu_gpu_transfer_time;
     for (int i = 1; i <= n_stream; ++i) {
       cudaStreamCreate(&stream[i]);
       // printf("stream %d created\n", i);
@@ -527,6 +488,10 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       cudaStreamSynchronize(stream[i]);
     }
 
+    record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
+
+    TimeCost kernel_time;
+
     for (int i = 1; i <= n_stream; i++) {
       int grid_dim = (elements_per_stream + block_size - 1) / block_size;
       basic_impl<<<grid_dim, block_size, 0, stream[i]>>>(
@@ -543,6 +508,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     }
 
     record.total_gpu_time = total_gpu_time.get_elapsed();
+    record.kernel_time = kernel_time.get_elapsed();
     record.z_value = h_z[5 * cols + 5];
 
     records.gpu_records.basic_streaming = record;
@@ -554,54 +520,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     cudaFree(d_y);
     cudaFree(d_z);
   }
-
-  // shared memory + tiling
-  // {
-  //   // GPU malloc
-  //   float *d_x, *d_y, *d_z;
-  //   cudaMalloc((void **)&d_x, elements * sizeof(float));
-  //   cudaMalloc((void **)&d_y, elements * sizeof(float));
-  //   cudaMalloc((void **)&d_z, elements * sizeof(float));
-  //   float *h_z = (float *)malloc(elements * sizeof(float));
-
-  //   ExecRecord record;
-  //   TimeCost total_gpu_time, cpu_gpu_transfer_time;
-  //   gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
-  //                            cudaMemcpyHostToDevice));
-  //   gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
-  //                            cudaMemcpyHostToDevice));
-  //   record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
-
-  //   int grid_dim = (elements + block_size - 1) / block_size;
-  //   TimeCost kernel_time;
-
-  //   // ? problem with irrational blockDim
-  //   int inc_rows = sqrt(block_size), inc_cols = sqrt(block_size);
-  //   inc_rows = inc_rows > rows ? rows : inc_rows;
-  //   inc_cols = inc_cols > cols ? cols : inc_cols;
-  //   shared_tiling_impl<<<grid_dim, block_size,
-  //                        block_size * 6 * sizeof(float)>>>(
-  //       d_x, d_y, d_z, rows, cols, inc_rows, inc_cols);
-  //   // cudaDeviceSynchronize();
-  //   check_kernel_err();
-  //   record.kernel_time = kernel_time.get_elapsed();
-
-  //   TimeCost gpu_cpu_transfer_time;
-  //   cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
-  //   record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
-
-  //   record.total_gpu_time = total_gpu_time.get_elapsed();
-  //   record.z_value = h_z[5 * cols + 5];
-
-  //   records.gpu_records.shared_tiling = record;
-
-  //   check_results(cpu_z, h_z, rows, cols, elements, "shared_tiling");
-
-  //   free(h_z);
-  //   cudaFree(d_x);
-  //   cudaFree(d_y);
-  //   cudaFree(d_z);
-  // }
 
   free(x_flat);
   free(y_flat);
