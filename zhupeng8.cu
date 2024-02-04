@@ -7,7 +7,7 @@
 // #define NUM_BANKS 32
 // #define LOG_NUM_BANKS 5
 // #define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
-int block_size = 512;
+int block_size = 1024;
 
 class TimeCost {
   double get_timestamp() const {
@@ -43,12 +43,21 @@ struct ExecRecords {
   } gpu_records;
 };
 
+inline void check_kernel_err() {
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    fprintf(stderr, "Error: kernel invoke failed, %s\n",
+            cudaGetErrorString(err));
+    exit(-1);
+  }
+}
+
 #define gpu_err_check(ans) gpu_err_check_impl((ans), __FILE__, __LINE__)
 inline void gpu_err_check_impl(cudaError_t code, const char *file, int line,
                                bool abort = true) {
   if (code != cudaSuccess) {
-    fprintf(stderr, "CUDA Error: %s %s:%d\n", cudaGetErrorString(code), file,
-            line);
+    fprintf(stderr, "Error: cuda func failed, %s %s:%d\n",
+            cudaGetErrorString(code), file, line);
     if (abort) {
       fflush(stderr);
       exit(code);
@@ -144,10 +153,13 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
     float elem4 = col < 2 ? 0 : y[row * cols + col - 2];
     float elem5 = col < 1 ? 0 : y[row * cols + col - 1];
     float elem6 = y[row * cols + col];
-    // printf("idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
-    //        "elements:%lf,%lf,%lf,%lf,%lf,%lf\n",
-    //        idx, row, col, x[idx], y[row * cols + col], elem1, elem2, elem3,
-    //        elem4, elem5, elem6);
+
+#ifdef DEBUG
+    printf("idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
+           "elements:%lf,%lf,%lf,%lf,%lf,%lf\n",
+           idx, row, col, x[idx], y[row * cols + col], elem1, elem2, elem3,
+           elem4, elem5, elem6);
+#endif
 
     z[idx] = elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
   }
@@ -173,12 +185,6 @@ __global__ void shared_memory_impl(const float *x, const float *y, float *z,
 
     // calculate using shared memory
     int row = idx / cols, col = idx % cols;
-    // float elem1 = row == 0 ? 0 : x[(row - 1) * cols + col];
-    // float elem2 = x[row * cols + col];
-    //     float elem3 = row == rows - 1 ? 0 : x[(row + 1) * cols + col];
-    //     float elem4 = col < 2 ? 0 : y[row * cols + col - 2];
-    //     float elem5 = col < 1 ? 0 : y[row * cols + col - 1];
-    //     float elem6 = y[row * cols + col];
 
     float elem1 =
         row == 0 ? 0
@@ -210,14 +216,20 @@ double cpu_cal_and_record(float **x, float **y, int rows, int cols,
   return cpu_tc.get_elapsed();
 }
 
-void check_results(float **cpu_z, float *h_z, int rows, int cols,
-                   int elements) {
+void check_results(float **cpu_z, float *h_z, int rows, int cols, int elements,
+                   const std::string &mode) {
   float *cpu_res_flat = (float *)malloc(elements * sizeof(float));
   flatten_matrix(cpu_z, &cpu_res_flat, rows, cols);
   for (int idx = 0; idx < elements; ++idx) {
     if (cpu_res_flat[idx] != h_z[idx]) {
-      printf("\033[1;31mError: CPU and GPU result does not match\n\033[0m\n");
+      printf("\033[1;31mError: mode %s CPU and GPU result does not "
+             "match\n\033[0m\n",
+             mode.c_str());
+
+#ifdef DEBUG
+      printf("debug mode\n");
       compare_flat_matrix(cpu_res_flat, h_z, rows, cols);
+#endif
       exit(-1);
     }
   }
@@ -256,8 +268,10 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
 
     int grid_dim = (elements + block_size - 1) / block_size;
+    printf("grid_dim:%d\n", grid_dim);
     TimeCost kernel_time;
     basic_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols);
+    check_kernel_err();
     cudaDeviceSynchronize();
     record.kernel_time = kernel_time.get_elapsed();
 
@@ -270,7 +284,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     records.gpu_records.basic = record;
 
-    check_results(cpu_z, h_z, rows, cols, elements);
+    check_results(cpu_z, h_z, rows, cols, elements, "basic");
   }
 
   // shared memory
@@ -299,7 +313,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     records.gpu_records.shared_memory = record;
 
-    check_results(cpu_z, h_z, rows, cols, elements);
+    check_results(cpu_z, h_z, rows, cols, elements, "basic");
   }
 
   free(h_z);
@@ -349,11 +363,13 @@ int main(int argc, char *argv[]) {
 
   gen_matrix(rows, cols, x, y);
 
-  // printf("\nprint x and y\n");
-  // print_matrix(x, rows, cols);
-  // printf("\n");
-  // print_matrix(y, rows, cols);
-  // printf("print x and y finished\n\n");
+#ifdef DEBUG
+  printf("\nprint x and y\n");
+  print_matrix(x, rows, cols);
+  printf("\n");
+  print_matrix(y, rows, cols);
+  printf("print x and y finished\n\n");
+#endif
 
   ExecRecords records = calculate_and_compare(x, y, rows, cols);
 
