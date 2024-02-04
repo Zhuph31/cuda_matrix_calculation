@@ -144,7 +144,14 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
   int block_offset = block_id * blockDim.x;
   int idx = block_offset + thread_id;
 
+#ifdef DEBUG
+  if (idx == 0) {
+    printf("rows:%d, cols:%d\n", rows, cols);
+  }
+#endif
+
   if (idx < rows * cols) {
+
     int row = idx / cols, col = idx % cols;
 
     float elem1 = row == 0 ? 0 : x[(row - 1) * cols + col];
@@ -154,14 +161,14 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
     float elem5 = col < 1 ? 0 : y[row * cols + col - 1];
     float elem6 = y[row * cols + col];
 
+    z[idx] = elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
+
 #ifdef DEBUG
     printf("idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
-           "elements:%lf,%lf,%lf,%lf,%lf,%lf\n",
-           idx, row, col, x[idx], y[row * cols + col], elem1, elem2, elem3,
-           elem4, elem5, elem6);
+           "elements:%lf,%lf,%lf,%lf,%lf,%lf, z_elem:%lf\n",
+           idx, row, col, x[idx], y[idx], elem1, elem2, elem3, elem4, elem5,
+           elem6, z[idx]);
 #endif
-
-    z[idx] = elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
   }
 }
 
@@ -176,6 +183,13 @@ __global__ void shared_memory_impl(const float *x, const float *y, float *z,
   int idx = block_elem_offset + thread_id;
 
   int x_offset = 0, y_offset = block_elems, z_offset = 2 * block_elems;
+
+#ifdef DEBUG
+  if (thread_id == 0) {
+    printf("x_offset:%d, y_offset:%d, z_offset:%d\n", x_offset, y_offset,
+           z_offset);
+  }
+#endif
 
   // only block elems number of threads, and idx cannot exceed total elements
   if (thread_id < block_elems && idx < rows * cols) {
@@ -205,6 +219,13 @@ __global__ void shared_memory_impl(const float *x, const float *y, float *z,
 
     // copy back to globak memory
     z[idx] = temp[z_offset + idx - block_elem_offset];
+
+#ifdef DEBUG
+    printf("idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
+           "elements:%lf,%lf,%lf,%lf,%lf,%lf, z_elem:%lf\n",
+           idx, row, col, x[idx], y[idx], elem1, elem2, elem3, elem4, elem5,
+           elem6, z[idx]);
+#endif
   }
 }
 
@@ -268,11 +289,10 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
 
     int grid_dim = (elements + block_size - 1) / block_size;
-    printf("grid_dim:%d\n", grid_dim);
     TimeCost kernel_time;
     basic_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols);
-    check_kernel_err();
     cudaDeviceSynchronize();
+    check_kernel_err();
     record.kernel_time = kernel_time.get_elapsed();
 
     TimeCost gpu_cpu_transfer_time;
@@ -299,9 +319,11 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     int grid_dim = (elements + block_size - 1) / block_size;
     TimeCost kernel_time;
-    shared_memory_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols,
-                                                 block_size / 3);
+    shared_memory_impl<<<grid_dim, block_size,
+                         block_size * 3 * sizeof(float)>>>(d_x, d_y, d_z, rows,
+                                                           cols, block_size);
     cudaDeviceSynchronize();
+    check_kernel_err();
     record.kernel_time = kernel_time.get_elapsed();
 
     TimeCost gpu_cpu_transfer_time;
@@ -313,7 +335,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     records.gpu_records.shared_memory = record;
 
-    check_results(cpu_z, h_z, rows, cols, elements, "basic");
+    check_results(cpu_z, h_z, rows, cols, elements, "shared");
   }
 
   free(h_z);
