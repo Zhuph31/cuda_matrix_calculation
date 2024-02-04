@@ -370,8 +370,11 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
   // flatten matrix for gpu memcpy
   int elements = rows * cols;
-  float *x_flat = (float *)malloc(elements * sizeof(float));
-  float *y_flat = (float *)malloc(elements * sizeof(float));
+  float *x_flat, *y_flat;
+  cudaMallocHost((void **)&x_flat, elements * sizeof(float),
+                 cudaHostAllocWriteCombined);
+  cudaMallocHost((void **)&y_flat, elements * sizeof(float),
+                 cudaHostAllocWriteCombined);
   flatten_matrix(x, &x_flat, rows, cols);
   flatten_matrix(y, &y_flat, rows, cols);
 
@@ -382,7 +385,10 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     cudaMalloc((void **)&d_x, elements * sizeof(float));
     cudaMalloc((void **)&d_y, elements * sizeof(float));
     cudaMalloc((void **)&d_z, elements * sizeof(float));
-    float *h_z = (float *)malloc(elements * sizeof(float));
+
+    float *h_z;
+    cudaMallocHost((void **)&h_z, elements * sizeof(float),
+                   cudaHostAllocWriteCombined);
 
     ExecRecord record;
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
@@ -409,10 +415,10 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     check_results(cpu_z, h_z, rows, cols, elements, "basic");
 
-    free(h_z);
+    cudaFree(d_z);
     cudaFree(d_x);
     cudaFree(d_y);
-    cudaFree(d_z);
+    cudaFree(h_z);
   }
 
   // basic + streaming memcpy
@@ -422,12 +428,10 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     cudaMalloc((void **)&d_x, elements * sizeof(float));
     cudaMalloc((void **)&d_y, elements * sizeof(float));
     cudaMalloc((void **)&d_z, elements * sizeof(float));
-    float *h_z = (float *)malloc(elements * sizeof(float));
 
-    // pin host side memroy
-    cudaHostRegister(x_flat, elements * sizeof(float), 0);
-    cudaHostRegister(y_flat, elements * sizeof(float), 0);
-    cudaHostRegister(h_z, elements * sizeof(float), 0);
+    float *h_z;
+    cudaMallocHost((void **)&h_z, elements * sizeof(float),
+                   cudaHostAllocWriteCombined);
 
     ExecRecord record;
 
@@ -510,14 +514,13 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     check_results(cpu_z, h_z, rows, cols, elements, "basic_streaming");
 
-    free(h_z);
+    cudaFree(h_z);
     cudaFree(d_x);
     cudaFree(d_y);
     cudaFree(d_z);
   }
 
-  free(x_flat);
-  free(y_flat);
+  printf("final free\n");
 
   cpu_free(cpu_z, rows);
 
