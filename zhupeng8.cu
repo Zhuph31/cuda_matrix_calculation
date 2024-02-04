@@ -271,15 +271,15 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
   flatten_matrix(x, &x_flat, rows, cols);
   flatten_matrix(y, &y_flat, rows, cols);
 
-  // GPU malloc
-  float *d_x, *d_y, *d_z;
-  cudaMalloc((void **)&d_x, elements * sizeof(float));
-  cudaMalloc((void **)&d_y, elements * sizeof(float));
-  cudaMalloc((void **)&d_z, elements * sizeof(float));
-  float *h_z = (float *)malloc(elements * sizeof(float));
-
   // basic execution
   {
+    // GPU malloc
+    float *d_x, *d_y, *d_z;
+    cudaMalloc((void **)&d_x, elements * sizeof(float));
+    cudaMalloc((void **)&d_y, elements * sizeof(float));
+    cudaMalloc((void **)&d_z, elements * sizeof(float));
+    float *h_z = (float *)malloc(elements * sizeof(float));
+
     ExecRecord record;
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
     gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
@@ -305,10 +305,22 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     records.gpu_records.basic = record;
 
     check_results(cpu_z, h_z, rows, cols, elements, "basic");
+
+    free(h_z);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_z);
   }
 
   // shared memory
   {
+    // GPU malloc
+    float *d_x, *d_y, *d_z;
+    cudaMalloc((void **)&d_x, elements * sizeof(float));
+    cudaMalloc((void **)&d_y, elements * sizeof(float));
+    cudaMalloc((void **)&d_z, elements * sizeof(float));
+    float *h_z = (float *)malloc(elements * sizeof(float));
+
     ExecRecord record;
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
     gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
@@ -318,10 +330,11 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
 
     int grid_dim = (elements + block_size - 1) / block_size;
+    int block_elements = block_size;
     TimeCost kernel_time;
-    shared_memory_impl<<<grid_dim, block_size,
-                         block_size * 3 * sizeof(float)>>>(d_x, d_y, d_z, rows,
-                                                           cols, block_size);
+    shared_memory_impl<<<grid_dim, block_elements,
+                         block_elements * 6 * sizeof(float)>>>(
+        d_x, d_y, d_z, rows, cols, block_size);
     cudaDeviceSynchronize();
     check_kernel_err();
     record.kernel_time = kernel_time.get_elapsed();
@@ -336,17 +349,17 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     records.gpu_records.shared_memory = record;
 
     check_results(cpu_z, h_z, rows, cols, elements, "shared");
+
+    free(h_z);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_z);
   }
 
-  free(h_z);
   free(x_flat);
   free(y_flat);
 
   cpu_free(cpu_z, rows);
-
-  cudaFree(d_x);
-  cudaFree(d_y);
-  cudaFree(d_z);
 
   return records;
 }
