@@ -155,17 +155,14 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
   int thread_id = threadIdx.x;
   int block_offset = block_id * blockDim.x;
 
-  if (thread_id >= stream_elements) {
-    return;
-  }
-
-  int idx = block_offset + thread_id + stream_elem_offset;
-
   int elements = rows * cols;
-
-  if (stream_elements <= 0 || stream_elem_offset >= elements) {
+  if (thread_id >= stream_elements || stream_elements <= 0 ||
+      stream_elem_offset >= elements) {
     return;
   }
+
+  int idx = block_offset + thread_id +
+            stream_elem_offset; // idx in flattened global memory
 
 #ifdef DEBUG
   if (idx == 0) {
@@ -442,8 +439,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     int elements_per_stream = (elements + n_stream - 1) / n_stream;
     // printf("elements per stream:%d\n", elements_per_stream);
-    // elements_per_stream = elements_per_stream < 100 ? 100 :
-    // elements_per_stream;
 
     // start streams & copy
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
@@ -502,7 +497,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                       cudaMemcpyDeviceToHost, stream[i]);
     }
 
-    for (int i = 0; i <= 10; i++) {
+    for (int i = 0; i <= n_stream; i++) {
       // printf("Synchronizing stream %d\n", i);
       cudaStreamSynchronize(stream[i]);
     }
