@@ -210,8 +210,9 @@ void check_results(float **cpu_z, float *h_z, int rows, int cols, int elements,
   flatten_matrix(cpu_z, &cpu_res_flat, rows, cols);
   for (int idx = 0; idx < elements; ++idx) {
     if (cpu_res_flat[idx] != h_z[idx]) {
-      printf("\033[1;31mError: mode %s CPU and GPU result does not "
-             "match\n\033[0m\n",
+      // printf("\033[1;31merror: mode %s cpu and gpu result does not "
+      //        "match\n\033[0m\n",
+      printf("Error: mode %s CPU and GPU result does not match\n",
              mode.c_str());
 
 #ifdef DEBUG
@@ -222,7 +223,8 @@ void check_results(float **cpu_z, float *h_z, int rows, int cols, int elements,
       // break;
     }
   }
-  printf("\033[1;32mVerifies mode %s, results match.\033[0m\n", mode.c_str());
+  // printf("\033[1;32mVerifies mode %s, results match.\033[0m\n",
+  // mode.c_str());
   free(cpu_res_flat);
 }
 
@@ -241,49 +243,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                  cudaHostAllocWriteCombined);
   flatten_matrix(x, &x_flat, rows, cols);
   flatten_matrix(y, &y_flat, rows, cols);
-
-  // basic execution
-  // {
-  //   // GPU malloc
-  //   float *d_x, *d_y, *d_z;
-  //   cudaMalloc((void **)&d_x, elements * sizeof(float));
-  //   cudaMalloc((void **)&d_y, elements * sizeof(float));
-  //   cudaMalloc((void **)&d_z, elements * sizeof(float));
-
-  //   float *h_z;
-  //   cudaMallocHost((void **)&h_z, elements * sizeof(float),
-  //                  cudaHostAllocWriteCombined);
-
-  //   ExecRecord record;
-  //   TimeCost total_gpu_time, cpu_gpu_transfer_time;
-  //   gpu_err_check(cudaMemcpy(d_x, x_flat, elements * sizeof(float),
-  //                            cudaMemcpyHostToDevice));
-  //   gpu_err_check(cudaMemcpy(d_y, y_flat, elements * sizeof(float),
-  //                            cudaMemcpyHostToDevice));
-  //   record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
-
-  //   int grid_dim = (elements + block_size - 1) / block_size;
-  //   TimeCost kernel_time;
-  //   basic_impl<<<grid_dim, block_size>>>(d_x, d_y, d_z, rows, cols, 0, 0,
-  //                                        elements);
-  //   record.kernel_time = kernel_time.get_elapsed();
-
-  //   TimeCost gpu_cpu_transfer_time;
-  //   cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
-  //   record.gpu_cpu_transfer_time = gpu_cpu_transfer_time.get_elapsed();
-
-  //   record.total_gpu_time = total_gpu_time.get_elapsed();
-  //   record.z_value = h_z[5 * cols + 5];
-
-  //   records.gpu_records.basic = record;
-
-  //   check_results(cpu_z, h_z, rows, cols, elements, "basic");
-
-  //   cudaFree(d_z);
-  //   cudaFree(d_x);
-  //   cudaFree(d_y);
-  //   cudaFree(h_z);
-  // }
 
   // basic + streaming memcpy
   {
@@ -401,7 +360,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                         &d_z[streams_begin_elem_offset[i - 1]],
                         streams_bytes[i - 1], cudaMemcpyDeviceToHost,
                         stream[i - 1]);
-        cudaEventRecord(dToHCpyEndEvents[i], stream[i - 1]);
+        cudaEventRecord(dToHCpyEndEvents[i - 1], stream[i - 1]);
       }
 
       // extra check for last stream
@@ -437,7 +396,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       cpu_gpu_transfer_time += ms / 1000;
       cudaEventElapsedTime(&ms, kernelStartEvents[i], kernelEndEvents[i]);
       kernel_time += ms / 1000;
-      cudaEventElapsedTime(&ms, dToHCpyStartEvents[i], dToHCpyStartEvents[i]);
+      cudaEventElapsedTime(&ms, dToHCpyStartEvents[i], dToHCpyEndEvents[i]);
       gpu_cpu_transfer_time += ms / 1000;
     }
 
@@ -490,7 +449,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  printf("specified rows:%d, cols:%d\n", rows, cols);
+  // printf("specified rows:%d, cols:%d\n", rows, cols);
 
   float **x, **y;
   cpu_malloc(&x, rows, cols);
@@ -508,7 +467,7 @@ int main(int argc, char *argv[]) {
 
   ExecRecords records = calculate_and_compare(x, y, rows, cols);
 
-  printf("%.6f\n", records.cpu_record);
+  // printf("%.6f\n", records.cpu_record);
   // records.gpu_records.basic.print();
   // records.gpu_records.shared_memory.print();
   // records.gpu_records.shared_tiling.print();
