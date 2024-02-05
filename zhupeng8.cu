@@ -63,19 +63,6 @@ inline void check_kernel_err() {
   }
 }
 
-#define gpu_err_check(ans) gpu_err_check_impl((ans), __FILE__, __LINE__)
-inline void gpu_err_check_impl(cudaError_t code, const char *file, int line,
-                               bool abort = true) {
-  if (code != cudaSuccess) {
-    fprintf(stderr, "Error: cuda func failed, %s %s:%d\n",
-            cudaGetErrorString(code), file, line);
-    if (abort) {
-      fflush(stderr);
-      exit(code);
-    }
-  }
-}
-
 void flatten_matrix(float **matrix, float **vec, int rows, int cols) {
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < cols; ++j) {
@@ -148,9 +135,9 @@ void cpu_calculate(float **x, float **y, int rows, int cols, float **z) {
   }
 }
 
-__global__ void basic_impl(const float *x, const float *y, float *z, int rows,
-                           int cols, int stream_id, int stream_elem_offset,
-                           int stream_elements) {
+__global__ void f_siggen(const float *x, const float *y, float *z, int rows,
+                         int cols, int stream_id, int stream_elem_offset,
+                         int stream_elements) {
   int block_id = blockIdx.x;
   int thread_id = threadIdx.x;
   int block_offset = block_id * blockDim.x;
@@ -167,7 +154,7 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
   int idx = block_offset + thread_id +
             stream_elem_offset; // idx in flattened global memory
 
-#ifdef DEBUG
+#ifdef zph_debug
   if (idx == 0) {
     printf("rows:%d, cols:%d\n", rows, cols);
   }
@@ -187,7 +174,7 @@ __global__ void basic_impl(const float *x, const float *y, float *z, int rows,
 
   z[idx] = elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
 
-#ifdef DEBUG
+#ifdef zph_debug
   printf(
       "basic debug stream:%d, idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
       "elements:%lf,%lf,%lf,%lf,%lf,%lf, z_elem:%lf\n",
@@ -215,7 +202,7 @@ void check_results(float **cpu_z, float *h_z, int rows, int cols, int elements,
       printf("Error: mode %s CPU and GPU result does not match\n",
              mode.c_str());
 
-#ifdef DEBUG
+#ifdef zph_debug
       printf("debug mode\n");
       compare_flat_matrix(cpu_res_flat, h_z, rows, cols);
 #endif
@@ -271,18 +258,11 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     elements_per_stream =
         elements_per_stream < cols ? cols : elements_per_stream;
 
-    int rows_in_streams, cols_in_streams;
-
     if (elements_per_stream <= cols) {
-      cols_in_streams = (cols + elements_per_stream - 1) / elements_per_stream;
-      rows_in_streams = rows;
     } else {
       // if elements per stream is more than elements per row, we ceil elements
       // per stream to the nearest multiple of elements per row
       elements_per_stream += cols - (elements_per_stream % cols);
-      cols_in_streams = 1;
-      int rows_per_stream = elements_per_stream / cols;
-      rows_in_streams = (rows + rows_per_stream - 1) / rows_per_stream;
     }
 
     // printf("elements_per_stream:%d, rows_in_streams:%d,
@@ -337,7 +317,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
         // check_kernel_err();
         cudaStreamSynchronize(stream[i]);
 
-#ifdef DEBUG
+#ifdef zph_debug
         printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
                "begin_byte_offset:%d, cur_stream_bytes:%d\n",
                i, begin_elem_offset, cur_stream_elements, begin_byte_offset,
@@ -351,7 +331,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
         int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
         // printf("starting kernel for stream:%d\n", i - 1);
         cudaEventRecord(kernelStartEvents[i - 1], stream[i - 1]);
-        basic_impl<<<grid_dim, block_size, 0, stream[i - 1]>>>(
+        f_siggen<<<grid_dim, block_size, 0, stream[i - 1]>>>(
             d_x, d_y, d_z, rows, cols, i - 1, streams_begin_elem_offset[i - 1],
             streams_elements[i - 1]);
         cudaEventRecord(kernelEndEvents[i - 1], stream[i - 1]);
@@ -367,7 +347,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       if (i == n_stream && streams_elements[i] > 0) {
         int grid_dim = (streams_elements[i] + block_size - 1) / block_size;
         cudaEventRecord(kernelStartEvents[i], stream[i]);
-        basic_impl<<<grid_dim, block_size, 0, stream[i]>>>(
+        f_siggen<<<grid_dim, block_size, 0, stream[i]>>>(
             d_x, d_y, d_z, rows, cols, i, streams_begin_elem_offset[i],
             streams_elements[i]);
         cudaEventRecord(kernelEndEvents[i], stream[i]);
@@ -378,9 +358,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
         cudaEventRecord(dToHCpyEndEvents[i], stream[i]);
       }
     }
-
-    // ! when the current stream launch kernel, the last stream may have not
-    // ! finished memcpy
 
     for (int i = 1; i <= n_stream; ++i) {
       // printf("Synchronizing stream %d\n", i);
@@ -415,8 +392,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     cudaFree(d_y);
     cudaFree(d_z);
   }
-
-  printf("final free\n");
 
   cpu_free(cpu_z, rows);
 
@@ -457,7 +432,7 @@ int main(int argc, char *argv[]) {
 
   gen_matrix(rows, cols, x, y);
 
-#ifdef DEBUG
+#ifdef zph_debug
   printf("\nprint x and y\n");
   print_matrix(x, rows, cols);
   printf("\n");
