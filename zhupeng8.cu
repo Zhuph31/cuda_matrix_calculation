@@ -360,7 +360,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
         cudaMemcpyAsync(&(d_y[begin_elem_offset]), &(y_flat[begin_elem_offset]),
                         cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
         // check_kernel_err();
-        cudaStreamSynchronize(stream[i]);
+        // cudaStreamSynchronize(stream[i]);
 
 #ifdef DEBUG
         printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
@@ -369,34 +369,24 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                cur_stream_bytes);
 #endif
       }
+    }
 
+    for (int i = 1; i <= n_stream; ++i) {
       // launch the kernel for the previous stream
       // printf("checking kernel launch for i:%d\n", i);
-      if (i > 1 && streams_elements[i - 1] > 0) {
-        int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
-        // printf("starting kernel for stream:%d\n", i - 1);
-        basic_impl<<<grid_dim, block_size, 0, stream[i - 1]>>>(
-            d_x, d_y, d_z, rows, cols, i - 1, streams_begin_elem_offset[i - 1],
-            streams_elements[i - 1]);
-        check_kernel_err();
-        cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i - 1]],
-                        &d_z[streams_begin_elem_offset[i - 1]],
-                        streams_bytes[i - 1], cudaMemcpyDeviceToHost,
-                        stream[i - 1]);
+      int grid_dim = (streams_elements[i] + block_size - 1) / block_size;
+      // printf("starting kernel for stream:%d\n", i - 1);
+      if (i < n_stream) {
+        cudaStreamSynchronize(stream[i + 1]);
       }
-
-      // extra check for last stream
-      if (i == n_stream && streams_elements[i] > 0) {
-        int grid_dim = (streams_elements[i] + block_size - 1) / block_size;
-        printf("starting kernel for stream:%d\n", i);
-        basic_impl<<<grid_dim, block_size, 0, stream[i]>>>(
-            d_x, d_y, d_z, rows, cols, i, streams_begin_elem_offset[i],
-            streams_elements[i]);
-        check_kernel_err();
-        cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i]],
-                        &d_z[streams_begin_elem_offset[i]], streams_bytes[i],
-                        cudaMemcpyDeviceToHost, stream[i]);
-      }
+      // cudaStreamSynchronize(stream[i]);
+      basic_impl<<<grid_dim, block_size, 0, stream[i]>>>(
+          d_x, d_y, d_z, rows, cols, i, streams_begin_elem_offset[i],
+          streams_elements[i]);
+      check_kernel_err();
+      cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i]],
+                      &d_z[streams_begin_elem_offset[i]], streams_bytes[i],
+                      cudaMemcpyDeviceToHost, stream[i]);
     }
 
     // ! when the current stream launch kernel, the last stream may have not
