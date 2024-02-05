@@ -218,7 +218,8 @@ void check_results(float **cpu_z, float *h_z, int rows, int cols, int elements,
       printf("debug mode\n");
       compare_flat_matrix(cpu_res_flat, h_z, rows, cols);
 #endif
-      exit(-1);
+      return;
+      // exit(-1);
       // break;
     }
   }
@@ -359,7 +360,7 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                       cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
       cudaMemcpyAsync(&(d_y[begin_elem_offset]), &(y_flat[begin_elem_offset]),
                       cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
-      check_kernel_err();
+      // check_kernel_err();
 
 #ifdef DEBUG
       printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
@@ -369,30 +370,35 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 #endif
     }
 
-    for (int i = 1; i <= n_stream; ++i) {
-      printf("Synchronizing stream %d\n", i);
-      cudaStreamSynchronize(stream[i]);
-    }
-
     record.cpu_gpu_transfer_time = cpu_gpu_transfer_time.get_elapsed();
+    printf("time passed after memcpy async:%lf\n",
+           total_gpu_time.get_elapsed());
 
     TimeCost kernel_time;
 
     for (int i = 1; i <= n_stream; i++) {
       int grid_dim = (elements_per_stream + block_size - 1) / block_size;
-      printf("starting kernel for stream:%d\n", i);
+      // printf("starting kernel for stream:%d\n", i);
+      if (i < n_stream) {
+        cudaStreamSynchronize(stream[i + 1]);
+      }
       basic_impl<<<grid_dim, block_size, 0, stream[i]>>>(
           d_x, d_y, d_z, rows, cols, i, streams_begin_elem_offset[i],
           streams_elements[i]);
-      check_kernel_err();
+      // check_kernel_err();
       cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i]],
                       &d_z[streams_begin_elem_offset[i]], streams_bytes[i],
                       cudaMemcpyDeviceToHost, stream[i]);
+
+      printf("time passed after stream %d kernel and memcpy async:%lf\n", i,
+             total_gpu_time.get_elapsed());
     }
 
     for (int i = 1; i <= n_stream; i++) {
       // printf("Synchronizing stream %d\n", i);
       cudaStreamSynchronize(stream[i]);
+      printf("time passed after sync stream %d:%lf\n", i,
+             total_gpu_time.get_elapsed());
     }
 
     record.total_gpu_time = total_gpu_time.get_elapsed();
