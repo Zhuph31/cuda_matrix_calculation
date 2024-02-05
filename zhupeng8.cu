@@ -333,17 +333,6 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     // craete streams
     cudaStream_t stream[n_stream + 1];
 
-    // find the actual number of streams that should be started
-    int needed_stream_num = n_stream;
-    for (int i = 1; i <= n_stream; ++i) {
-      int begin_elem_offset = (i - 1) * elements_per_stream;
-      if (begin_elem_offset >= elements) {
-        needed_stream_num = i - 1;
-        break;
-      }
-    }
-    printf("needed stream num:%d\n", needed_stream_num);
-
     // start streams & copy
     TimeCost total_gpu_time, cpu_gpu_transfer_time;
     for (int i = 1; i <= n_stream; ++i) {
