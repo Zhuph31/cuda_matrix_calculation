@@ -75,12 +75,15 @@ void compare_flat_matrix(float *l, float *r, int rows, int cols) {
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < cols; ++j) {
       if (l[i * cols + j] != r[i * cols + j]) {
-        printf("\033[1;31m%.6f/%.6f,\033[0m", l[i * cols + j], r[i * cols + j]);
+        // printf("\033[1;31m%.6f/%.6f,\033[0m", l[i * cols + j], r[i * cols +
+        // j]);
+        printf("%d|%d, %f|%f\n", i, j, l[i * cols + j], r[i * cols + j]);
+        exit(1);
       } else {
-        printf("\033[1;32m%.6f,\033[0m", l[i * cols + j]);
+        // printf("\033[1;32m%.6f,\033[0m", l[i * cols + j]);
       }
     }
-    printf("\n");
+    // printf("\n");
   }
 }
 
@@ -174,13 +177,13 @@ __global__ void f_siggen(const float *x, const float *y, float *z, int rows,
 
   z[idx] = elem1 + elem2 + elem3 - elem4 - elem5 - elem6;
 
-#ifdef zph_debug
-  printf(
-      "basic debug stream:%d, idx:%d, row:%d, col:%d, x_elem:%lf, y_elem:%lf, "
-      "elements:%lf,%lf,%lf,%lf,%lf,%lf, z_elem:%lf\n",
-      stream_id, idx, row, col, x[idx], y[idx], elem1, elem2, elem3, elem4,
-      elem5, elem6, z[idx]);
-#endif
+  if (row == 5059 && col == 50117) {
+    printf("basic debug stream:%d, idx:%d, row:%d, col:%d, "
+           "x_elem:%lf, y_elem:%lf, "
+           "elements:%lf,%lf,%lf,%lf,%lf,%lf, z_elem:%lf\n",
+           stream_id, idx, row, col, x[idx], y[idx], elem1, elem2, elem3, elem4,
+           elem5, elem6, z[idx]);
+  }
 }
 
 double cpu_cal_and_record(float **x, float **y, int rows, int cols,
@@ -193,19 +196,25 @@ double cpu_cal_and_record(float **x, float **y, int rows, int cols,
 
 void check_results(float **cpu_z, float *h_z, int rows, int cols, int elements,
                    const std::string &mode) {
+  int count = 0;
   float *cpu_res_flat = (float *)malloc(elements * sizeof(float));
   flatten_matrix(cpu_z, &cpu_res_flat, rows, cols);
+
+  compare_flat_matrix(cpu_res_flat, h_z, rows, cols);
   for (int idx = 0; idx < elements; ++idx) {
     if (cpu_res_flat[idx] != h_z[idx]) {
       // printf("\033[1;31merror: mode %s cpu and gpu result does not "
       //        "match\n\033[0m\n",
       printf("Error: mode %s CPU and GPU result does not match\n",
              mode.c_str());
+      ++count;
+      if (count > 100) {
+        break;
+      }
 
-#ifdef zph_debug
-      printf("debug mode\n");
-      compare_flat_matrix(cpu_res_flat, h_z, rows, cols);
-#endif
+      //       #ifdef zph_debug
+      // printf("debug mode\n");
+      // #endif
       exit(-1);
       // break;
     }
@@ -317,17 +326,16 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
         // check_kernel_err();
         cudaStreamSynchronize(stream[i]);
 
-#ifdef zph_debug
         printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
                "begin_byte_offset:%d, cur_stream_bytes:%d\n",
                i, begin_elem_offset, cur_stream_elements, begin_byte_offset,
                cur_stream_bytes);
-#endif
       }
 
       // launch the kernel for the previous stream
       // printf("checking kernel launch for i:%d\n", i);
       if (i > 1 && streams_elements[i - 1] > 0) {
+        printf("launching kernel for %d\n", i - 1);
         int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
         // printf("starting kernel for stream:%d\n", i - 1);
         cudaEventRecord(kernelStartEvents[i - 1], stream[i - 1]);
@@ -341,10 +349,13 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
                         streams_bytes[i - 1], cudaMemcpyDeviceToHost,
                         stream[i - 1]);
         cudaEventRecord(dToHCpyEndEvents[i - 1], stream[i - 1]);
+        printf("copy back, stream %d, elem offset:%d, bytes:%d\n", i - 1,
+               streams_begin_elem_offset[i - 1], streams_bytes[i - 1]);
       }
 
       // extra check for last stream
       if (i == n_stream && streams_elements[i] > 0) {
+        printf("launching kernel for %d\n", i);
         int grid_dim = (streams_elements[i] + block_size - 1) / block_size;
         cudaEventRecord(kernelStartEvents[i], stream[i]);
         f_siggen<<<grid_dim, block_size, 0, stream[i]>>>(
@@ -355,14 +366,24 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
         cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i]],
                         &d_z[streams_begin_elem_offset[i]], streams_bytes[i],
                         cudaMemcpyDeviceToHost, stream[i]);
+        printf("copy back, stream %d, elem offset:%d, bytes:%d\n", i,
+               streams_begin_elem_offset[i], streams_bytes[i]);
         cudaEventRecord(dToHCpyEndEvents[i], stream[i]);
       }
     }
 
     for (int i = 1; i <= n_stream; ++i) {
-      // printf("Synchronizing stream %d\n", i);
       cudaStreamSynchronize(stream[i]);
+      printf("Synchronized stream %d\n", i);
     }
+
+    printf("debug element:%f, %f \n", cpu_z[5059][50117], h_z[274313684]);
+    // getchar();
+
+    cudaMemcpy(h_z, d_z, elements * sizeof(float), cudaMemcpyDeviceToHost);
+
+    printf("debug element:%f, %f \n", cpu_z[5059][50117], h_z[274313684]);
+    // getchar();
 
     double cpu_gpu_transfer_time = 0;
     double kernel_time = 0;
