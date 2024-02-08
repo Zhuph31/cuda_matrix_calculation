@@ -379,7 +379,12 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
     record.kernel_time = kernel_time;
     record.gpu_cpu_transfer_time = gpu_cpu_transfer_time;
     record.total_gpu_time = total_gpu_time.get_elapsed();
-    record.z_value = h_z[5 * cols + 5];
+
+    if (rows > 5 && cols > 5) {
+      record.z_value = h_z[5 * cols + 5];
+    } else {
+      record.z_value = 0;
+    }
 
     records.gpu_records.basic_streaming = record;
 
