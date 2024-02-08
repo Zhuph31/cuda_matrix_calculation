@@ -141,18 +141,16 @@ __global__ void f_siggen(const float *x, const float *y, float *z, int rows,
   int block_id = blockIdx.x;
   int thread_id = threadIdx.x;
   int block_offset = block_id * blockDim.x;
+  int stream_thread_id = block_offset + thread_id;
 
   int elements = rows * cols;
-  if (thread_id >= stream_elements || stream_elements <= 0 ||
+  if (stream_thread_id >= stream_elements || stream_elements <= 0 ||
       stream_elem_offset >= elements) {
-    if (thread_id == 0) {
-      printf("stream id:%d, skip kernel execution\n", stream_id);
-    }
     return;
   }
 
-  int idx = block_offset + thread_id +
-            stream_elem_offset; // idx in flattened global memory
+  int idx =
+      stream_thread_id + stream_elem_offset; // idx in flattened global memory
 
 #ifdef zph_debug
   if (idx == 0) {
