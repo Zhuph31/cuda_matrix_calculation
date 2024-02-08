@@ -9,7 +9,7 @@
 // #define LOG_NUM_BANKS 5
 // #define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
 int block_size = 1024;
-int n_stream = 10;
+int n_stream = 30;
 
 class TimeCost {
   double get_timestamp() const {
