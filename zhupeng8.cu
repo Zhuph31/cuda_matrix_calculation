@@ -317,6 +317,10 @@ ExecRecords calculate_and_compare_debug(float **x, float **y, int rows,
         cudaMemcpyAsync(&(d_y[begin_elem_offset]), &(y_flat[begin_elem_offset]),
                         cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
         cudaEventRecord(hToDCpyEndEvents[i], stream[i]);
+        // if (i > 1) {
+        //   cudaStreamWaitEvent(stream[i - 1], hToDCpyEndEvents[i]);
+        // }
+        cudaStreamSynchronize(stream[i]);
         // check_kernel_err();
 
 #ifdef zph_debug
@@ -334,7 +338,8 @@ ExecRecords calculate_and_compare_debug(float **x, float **y, int rows,
       if (i > 1 && streams_elements[i - 1] > 0) {
         int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
         // printf("starting kernel for stream:%d\n", i - 1);
-        cudaStreamWaitEvent(stream[i - 1], hToDCpyEndEvents[i]);
+        // cudaStreamWaitEvent(stream[i - 1], hToDCpyEndEvents[i]);
+        // cudaStreamSynchronize(stream[i]);
         cudaEventRecord(kernelStartEvents[i - 1], stream[i - 1]);
         f_siggen<<<grid_dim, block_size, 0, stream[i - 1]>>>(
             d_x, d_y, d_z, rows, cols, i - 1, streams_begin_elem_offset[i - 1],

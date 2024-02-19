@@ -4,7 +4,7 @@
 CC=g++
 NVCC=nvcc
 CXXFLAGS= -Wall -std=c++17 -O2 -MD -MP -g
-CUDAFLAGS= $(aflags) -std=c++17 -arch=compute_86 -MD -MP 
+CUDAFLAGS= $(aflags) -std=c++17 -arch=compute_86 -MD -MP -g
 LIBS= -lcudart
 LIBDIRS=
 INCDIRS=
