@@ -213,11 +213,9 @@ void check_results(float **cpu_z, float *h_z, int rows, int cols, int elements,
   free(cpu_res_flat);
 }
 
-ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
+ExecRecords calculate_and_compare_debug(float **x, float **y, int rows,
+                                        int cols) {
   ExecRecords records;
-
-  float **cpu_z;
-  records.cpu_record = cpu_cal_and_record(x, y, rows, cols, &cpu_z);
 
   // flatten matrix for gpu memcpy
   int elements = rows * cols;
@@ -388,15 +386,192 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
 
     records.gpu_records.basic_streaming = record;
 
-    check_results(cpu_z, h_z, rows, cols, elements, "basic_streaming");
-
     cudaFree(h_z);
     cudaFree(d_x);
     cudaFree(d_y);
     cudaFree(d_z);
   }
 
-  cpu_free(cpu_z, rows);
+  return records;
+}
+
+ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
+  ExecRecords records;
+
+  // flatten matrix for gpu memcpy
+  int elements = rows * cols;
+  float *x_flat, *y_flat;
+  cudaMallocHost((void **)&x_flat, elements * sizeof(float),
+                 cudaHostAllocWriteCombined);
+  cudaMallocHost((void **)&y_flat, elements * sizeof(float),
+                 cudaHostAllocWriteCombined);
+  flatten_matrix(x, &x_flat, rows, cols);
+  flatten_matrix(y, &y_flat, rows, cols);
+
+  // basic + streaming memcpy
+  {
+    // GPU malloc
+    float *d_x, *d_y, *d_z;
+    cudaMalloc((void **)&d_x, elements * sizeof(float));
+    cudaMalloc((void **)&d_y, elements * sizeof(float));
+    cudaMalloc((void **)&d_z, elements * sizeof(float));
+
+    float *h_z;
+    cudaMallocHost((void **)&h_z, elements * sizeof(float),
+                   cudaHostAllocWriteCombined);
+
+    ExecRecord record;
+
+    std::vector<int> streams_begin_elem_offset(n_stream + 1, 0),
+        streams_elements(n_stream + 1, 0),
+        streams_begin_byte_offset(n_stream + 1, 0),
+        streams_bytes(n_stream + 1, 0);
+
+    int elements_per_stream = (elements + n_stream - 1) / n_stream;
+    // printf("elements per stream:%d\n", elements_per_stream);
+
+    // ? make each stream at least process 1 row, could be less effective for
+    // ? small rows big cols
+    elements_per_stream =
+        elements_per_stream < cols ? cols : elements_per_stream;
+
+    if (elements_per_stream <= cols) {
+    } else {
+      // if elements per stream is more than elements per row, we ceil elements
+      // per stream to the nearest multiple of elements per row
+      elements_per_stream += cols - (elements_per_stream % cols);
+    }
+
+    // printf("elements_per_stream:%d, rows_in_streams:%d,
+    // cols_in_streams:%d\n",
+    //        elements_per_stream, rows_in_streams, cols_in_streams);
+
+    // craete streams
+    cudaStream_t stream[n_stream + 1];
+
+    cudaEvent_t hToDCpyStartEvents[n_stream + 1],
+        hToDCpyEndEvents[n_stream + 1], dToHCpyStartEvents[n_stream + 1],
+        dToHCpyEndEvents[n_stream + 1], kernelStartEvents[n_stream + 1],
+        kernelEndEvents[n_stream + 1];
+
+    for (int i = 1; i <= n_stream; ++i) {
+      cudaEventCreate(&hToDCpyStartEvents[i]);
+      cudaEventCreate(&hToDCpyEndEvents[i]);
+      cudaEventCreate(&dToHCpyStartEvents[i]);
+      cudaEventCreate(&dToHCpyEndEvents[i]);
+      cudaEventCreate(&kernelStartEvents[i]);
+      cudaEventCreate(&kernelEndEvents[i]);
+    }
+
+    // start streams & copy
+    TimeCost total_gpu_time;
+    for (int i = 1; i <= n_stream; ++i) {
+      // printf("ranging for i:%d\n", i);
+      cudaStreamCreate(&stream[i]);
+      int begin_elem_offset = (i - 1) * elements_per_stream;
+
+      if (begin_elem_offset < elements) {
+        // printf("abort creating stream %d cause not needed\n", i);
+
+        int cur_stream_elements = elements_per_stream;
+        if (begin_elem_offset + cur_stream_elements >= elements) {
+          cur_stream_elements = elements - begin_elem_offset;
+        }
+
+        int begin_byte_offset = begin_elem_offset * sizeof(float),
+            cur_stream_bytes = cur_stream_elements * sizeof(float);
+        streams_begin_elem_offset[i] = begin_elem_offset;
+        streams_begin_byte_offset[i] = begin_byte_offset;
+        streams_elements[i] = cur_stream_elements;
+        streams_bytes[i] = cur_stream_bytes;
+
+        cudaEventRecord(hToDCpyStartEvents[i], stream[i]);
+        cudaMemcpyAsync(&(d_x[begin_elem_offset]), &(x_flat[begin_elem_offset]),
+                        cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
+        cudaMemcpyAsync(&(d_y[begin_elem_offset]), &(y_flat[begin_elem_offset]),
+                        cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
+        cudaEventRecord(hToDCpyEndEvents[i], stream[i]);
+        // check_kernel_err();
+        cudaStreamSynchronize(stream[i]);
+
+#ifdef zph_debug
+        printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
+               "begin_byte_offset:%d, cur_stream_bytes:%d\n",
+               i, begin_elem_offset, cur_stream_elements, begin_byte_offset,
+               cur_stream_bytes);
+#endif
+      }
+
+      // launch the kernel for the previous stream
+      // printf("checking kernel launch for i:%d\n", i);
+      if (i > 1 && streams_elements[i - 1] > 0) {
+        int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
+        // printf("starting kernel for stream:%d\n", i - 1);
+        cudaEventRecord(kernelStartEvents[i - 1], stream[i - 1]);
+        f_siggen<<<grid_dim, block_size, 0, stream[i - 1]>>>(
+            d_x, d_y, d_z, rows, cols, i - 1, streams_begin_elem_offset[i - 1],
+            streams_elements[i - 1]);
+        cudaEventRecord(kernelEndEvents[i - 1], stream[i - 1]);
+        cudaEventRecord(dToHCpyStartEvents[i - 1], stream[i - 1]);
+        cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i - 1]],
+                        &d_z[streams_begin_elem_offset[i - 1]],
+                        streams_bytes[i - 1], cudaMemcpyDeviceToHost,
+                        stream[i - 1]);
+        cudaEventRecord(dToHCpyEndEvents[i - 1], stream[i - 1]);
+      }
+
+      // extra check for last stream
+      if (i == n_stream && streams_elements[i] > 0) {
+        int grid_dim = (streams_elements[i] + block_size - 1) / block_size;
+        cudaEventRecord(kernelStartEvents[i], stream[i]);
+        f_siggen<<<grid_dim, block_size, 0, stream[i]>>>(
+            d_x, d_y, d_z, rows, cols, i, streams_begin_elem_offset[i],
+            streams_elements[i]);
+        cudaEventRecord(kernelEndEvents[i], stream[i]);
+        cudaEventRecord(dToHCpyStartEvents[i], stream[i]);
+        cudaMemcpyAsync(&h_z[streams_begin_elem_offset[i]],
+                        &d_z[streams_begin_elem_offset[i]], streams_bytes[i],
+                        cudaMemcpyDeviceToHost, stream[i]);
+        cudaEventRecord(dToHCpyEndEvents[i], stream[i]);
+      }
+    }
+
+    for (int i = 1; i <= n_stream; ++i) {
+      // printf("Synchronizing stream %d\n", i);
+      cudaStreamSynchronize(stream[i]);
+    }
+
+    double cpu_gpu_transfer_time = 0;
+    double kernel_time = 0;
+    double gpu_cpu_transfer_time = 0;
+    for (int i = 1; i < n_stream; ++i) {
+      float ms;
+      cudaEventElapsedTime(&ms, hToDCpyStartEvents[i], hToDCpyEndEvents[i]);
+      cpu_gpu_transfer_time += ms / 1000;
+      cudaEventElapsedTime(&ms, kernelStartEvents[i], kernelEndEvents[i]);
+      kernel_time += ms / 1000;
+      cudaEventElapsedTime(&ms, dToHCpyStartEvents[i], dToHCpyEndEvents[i]);
+      gpu_cpu_transfer_time += ms / 1000;
+    }
+
+    record.cpu_gpu_transfer_time = cpu_gpu_transfer_time;
+    record.kernel_time = kernel_time;
+    record.gpu_cpu_transfer_time = gpu_cpu_transfer_time;
+    record.total_gpu_time = total_gpu_time.get_elapsed();
+
+    if (rows > 5 && cols > 5) {
+      record.z_value = h_z[5 * cols + 5];
+    } else {
+      record.z_value = 0;
+    }
+
+    records.gpu_records.basic_streaming = record;
+
+    cudaFree(h_z);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_z);
+  }
 
   return records;
 }
@@ -443,12 +618,12 @@ int main(int argc, char *argv[]) {
   printf("print x and y finished\n\n");
 #endif
 
-  ExecRecords records = calculate_and_compare(x, y, rows, cols);
+  {
+    ExecRecords records = calculate_and_compare(x, y, rows, cols);
+    records.gpu_records.basic_streaming.print();
+  }
 
-  // printf("%.6f\n", records.cpu_record);
-  // records.gpu_records.basic.print();
-  // records.gpu_records.shared_memory.print();
-  // records.gpu_records.shared_tiling.print();
+  ExecRecords records = calculate_and_compare_debug(x, y, rows, cols);
   records.gpu_records.basic_streaming.print();
 
   cpu_free(x, rows);
