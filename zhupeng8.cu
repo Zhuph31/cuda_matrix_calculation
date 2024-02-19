@@ -9,7 +9,7 @@
 // #define LOG_NUM_BANKS 5
 // #define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
 int block_size = 1024;
-int n_stream = 30;
+int n_stream = 10;
 
 class TimeCost {
   double get_timestamp() const {
@@ -31,6 +31,9 @@ struct ExecRecord {
   double kernel_time;
   double gpu_cpu_transfer_time;
   float z_value;
+  std::vector<double> stream_cpu_gpu_transfer_time;
+  std::vector<double> stream_kernel_time;
+  std::vector<double> stream_gpu_cpu_transfer_time;
   ExecRecord() {
     total_gpu_time = -1;
     cpu_gpu_transfer_time = -1;
@@ -41,6 +44,10 @@ struct ExecRecord {
   void print() const {
     printf("%.6f %.6f %.6f %.6f %.6f\n", total_gpu_time, cpu_gpu_transfer_time,
            kernel_time, gpu_cpu_transfer_time, z_value);
+    for (int i = 0; i < stream_cpu_gpu_transfer_time.size(); ++i) {
+      printf("stream:%d, %lf,%lf,%lf\n", i + 1, stream_cpu_gpu_transfer_time[i],
+             stream_kernel_time[i], stream_gpu_cpu_transfer_time[i]);
+    }
   }
 };
 
@@ -311,7 +318,6 @@ ExecRecords calculate_and_compare_debug(float **x, float **y, int rows,
                         cur_stream_bytes, cudaMemcpyHostToDevice, stream[i]);
         cudaEventRecord(hToDCpyEndEvents[i], stream[i]);
         // check_kernel_err();
-        cudaStreamSynchronize(stream[i]);
 
 #ifdef zph_debug
         printf("stream:%d, begin_elem_offset:%d, cur_stream_elements:%d, "
@@ -320,12 +326,15 @@ ExecRecords calculate_and_compare_debug(float **x, float **y, int rows,
                cur_stream_bytes);
 #endif
       }
+    }
 
+    for (int i = 1; i <= n_stream; ++i) {
       // launch the kernel for the previous stream
       // printf("checking kernel launch for i:%d\n", i);
       if (i > 1 && streams_elements[i - 1] > 0) {
         int grid_dim = (streams_elements[i - 1] + block_size - 1) / block_size;
         // printf("starting kernel for stream:%d\n", i - 1);
+        cudaStreamWaitEvent(stream[i - 1], hToDCpyEndEvents[i]);
         cudaEventRecord(kernelStartEvents[i - 1], stream[i - 1]);
         f_siggen<<<grid_dim, block_size, 0, stream[i - 1]>>>(
             d_x, d_y, d_z, rows, cols, i - 1, streams_begin_elem_offset[i - 1],
@@ -367,10 +376,13 @@ ExecRecords calculate_and_compare_debug(float **x, float **y, int rows,
       float ms;
       cudaEventElapsedTime(&ms, hToDCpyStartEvents[i], hToDCpyEndEvents[i]);
       cpu_gpu_transfer_time += ms / 1000;
+      record.stream_cpu_gpu_transfer_time.push_back(ms / 1000);
       cudaEventElapsedTime(&ms, kernelStartEvents[i], kernelEndEvents[i]);
       kernel_time += ms / 1000;
+      record.stream_kernel_time.push_back(ms / 1000);
       cudaEventElapsedTime(&ms, dToHCpyStartEvents[i], dToHCpyEndEvents[i]);
       gpu_cpu_transfer_time += ms / 1000;
+      record.stream_gpu_cpu_transfer_time.push_back(ms / 1000);
     }
 
     record.cpu_gpu_transfer_time = cpu_gpu_transfer_time;
@@ -548,9 +560,12 @@ ExecRecords calculate_and_compare(float **x, float **y, int rows, int cols) {
       float ms;
       cudaEventElapsedTime(&ms, hToDCpyStartEvents[i], hToDCpyEndEvents[i]);
       cpu_gpu_transfer_time += ms / 1000;
+      record.stream_cpu_gpu_transfer_time.push_back(ms / 1000);
       cudaEventElapsedTime(&ms, kernelStartEvents[i], kernelEndEvents[i]);
+      record.stream_kernel_time.push_back(ms / 1000);
       kernel_time += ms / 1000;
       cudaEventElapsedTime(&ms, dToHCpyStartEvents[i], dToHCpyEndEvents[i]);
+      record.stream_gpu_cpu_transfer_time.push_back(ms / 1000);
       gpu_cpu_transfer_time += ms / 1000;
     }
 
@@ -622,6 +637,7 @@ int main(int argc, char *argv[]) {
     ExecRecords records = calculate_and_compare(x, y, rows, cols);
     records.gpu_records.basic_streaming.print();
   }
+  printf("\n");
 
   ExecRecords records = calculate_and_compare_debug(x, y, rows, cols);
   records.gpu_records.basic_streaming.print();
